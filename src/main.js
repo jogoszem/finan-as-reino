@@ -775,7 +775,7 @@ function buildPresentationPages() {
         </div>
         <div class="presentation-audit-footnote">
           <strong>Ajustes aplicados à base</strong>
-          <p>Luciana Caroline Correia da Silva foi excluída dos cálculos. Thaise Almeida e Yasmine Delefrati foram adicionadas conforme solicitado. Os dois lançamentos de Caio são mantidos porque correspondem a ele e à esposa.</p>
+          <p>Luciana Caroline Correia da Silva foi excluída dos cálculos. Jaqueline Pereira Fachone também foi excluída após a desistência do curso e a devolução do pagamento. Thaise Almeida e Yasmine Delefrati foram adicionadas conforme solicitado. Os dois lançamentos de Caio são mantidos porque correspondem a ele e à esposa.</p>
         </div>`,
     },
   ];

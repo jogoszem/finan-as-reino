@@ -41,4 +41,7 @@ export const manualRecords = [
   },
 ];
 
-export const excludedParticipants = ["LUCIANA CAROLINE CORREIA DA SILVA"];
+export const excludedParticipants = [
+  "LUCIANA CAROLINE CORREIA DA SILVA",
+  "JAQUELINE PEREIRA FACHONE",
+];
