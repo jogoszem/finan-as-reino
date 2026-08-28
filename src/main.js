@@ -644,7 +644,7 @@ function buildPresentationPages() {
   const futureForecast = timeline.reduce((total, item) => total + item.forecast, 0);
   const comparisonDifference = summary.credited - ministry.classes;
 
-  return [
+  const pages = [
     {
       theme: "sources",
       kicker: "Página 1 · Fontes",
@@ -779,6 +779,11 @@ function buildPresentationPages() {
         </div>`,
     },
   ];
+
+  return [pages.at(-1), ...pages.slice(1, -1)].map((page, index) => ({
+    ...page,
+    kicker: page.kicker.replace(/Página \d+/, `Página ${index + 1}`),
+  }));
 }
 
 function renderPresentation() {
