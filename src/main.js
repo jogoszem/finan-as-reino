@@ -5,6 +5,8 @@ import "./style.css";
 
 const sourceWorkbook = new URL("../Libras.xlsx", import.meta.url);
 const ministryFinanceCsv = new URL("../finançassinaisdoreino.csv", import.meta.url);
+const brandLogo = new URL("./logos/logo.svg", import.meta.url);
+const crownLogo = new URL("./logos/coroa.svg", import.meta.url);
 
 const state = {
   records: [],
@@ -59,6 +61,7 @@ const icons = {
   clock: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   spark: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Zm6 11 .8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14Z" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   arrow: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  menu: `<svg class="icon mobile-menu-open-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>`,
   close: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m7 7 10 10M17 7 7 17" stroke-linecap="round"/></svg>`,
 };
 
@@ -111,8 +114,8 @@ function summarizeMinistry(records) {
   const totalByType = (type) => records
     .filter((record) => record.type.toLocaleLowerCase("pt-BR") === type)
     .reduce((total, record) => total + record.amount, 0);
-  const totalByKind = (kind) => records
-    .filter((record) => record.financeKind.toLocaleLowerCase("pt-BR") === kind)
+  const expensesByKind = (kind) => records
+    .filter((record) => record.financeKind.toLocaleLowerCase("pt-BR") === kind && record.type.toLocaleLowerCase("pt-BR") === "saida")
     .reduce((total, record) => total + record.amount, 0);
   const entries = totalByType("entrada");
   const exits = totalByType("saida");
@@ -121,8 +124,8 @@ function summarizeMinistry(records) {
     entries,
     exits,
     balance: entries - exits,
-    classes: totalByKind("aulas"),
-    general: totalByKind("geral"),
+    classes: expensesByKind("aulas"),
+    general: expensesByKind("geral"),
   };
 }
 
@@ -258,12 +261,13 @@ function groupCashFlowByMonth(records, ministryRecords) {
   });
 
   ministryRecords.forEach((record) => {
+    const type = record.type.toLocaleLowerCase("pt-BR");
+    const kind = record.financeKind.toLocaleLowerCase("pt-BR");
+    if (type !== "saida" || kind !== "aulas") return;
     const date = record.date ? new Date(`${record.date}T12:00:00`) : null;
     if (!date || Number.isNaN(date.getTime())) return;
     const group = ensureGroup(date);
-    const type = record.type.toLocaleLowerCase("pt-BR");
-    if (type === "entrada") group.income += record.amount;
-    if (type === "saida") group.outgoing += record.amount;
+    group.outgoing += record.amount;
   });
 
   return [...groups.values()].sort((a, b) => a.date - b.date);
@@ -525,11 +529,11 @@ function cashFlowComparisonChart(records, ministryRecords) {
           return `<div class="month-group">
             <div class="bar-wrap" style="--height:${incomeHeight}%">
               <div class="bar bar-income" style="height:${incomeHeight}%;opacity:${item.income ? 1 : 0}"></div>
-              <div class="bar-tooltip">Entradas líquidas<br><strong>${currency.format(item.income)}</strong></div>
+              <div class="bar-tooltip">Receita líquida do curso<br><strong>${currency.format(item.income)}</strong></div>
             </div>
             <div class="bar-wrap" style="--height:${outgoingHeight}%">
               <div class="bar bar-outgoing" style="height:${outgoingHeight}%;opacity:${item.outgoing ? 1 : 0}"></div>
-              <div class="bar-tooltip">Saídas do Ministério<br><strong>${currency.format(item.outgoing)}</strong></div>
+              <div class="bar-tooltip">Despesas das aulas<br><strong>${currency.format(item.outgoing)}</strong></div>
             </div>
           </div>`;
         })
@@ -602,7 +606,7 @@ function singleSeriesChart(groups, tone = "green") {
 function methodsChart(records) {
   const methods = groupByMethod(records);
   const total = methods.reduce((sum, item) => sum + item.value, 0) || 1;
-  const colors = ["#307b67", "#e89555", "#d8e76a", "#5678a5"];
+  const colors = ["#006cfc", "#55a9ff", "#24303c", "#8cc8ff"];
   let cursor = 0;
   const stops = methods.map((item, index) => {
     const start = cursor;
@@ -638,7 +642,7 @@ function buildPresentationPages() {
   const overdueInstallments = defaulters.reduce((total, person) => total + person.installments, 0);
   const toReconcile = timeline.reduce((total, item) => total + item.toReconcile, 0);
   const futureForecast = timeline.reduce((total, item) => total + item.forecast, 0);
-  const comparisonDifference = summary.credited + ministry.entries - ministry.exits;
+  const comparisonDifference = summary.credited - ministry.classes;
 
   return [
     {
@@ -732,8 +736,8 @@ function buildPresentationPages() {
           <p>Fonte: finançassinaisdoreino.csv · soma de amount onde type = “saida”.</p>
         </div>
         <div class="presentation-metric-grid">
-          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas do núcleo de aulas")}><span>Núcleo de aulas</span><strong>${currency.format(ministry.classes)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "aulas").length} lançamentos com finance_kind = aulas.</p></article>
-          <article class="audit-clickable" ${auditAttributes("ministry-general", "despesas gerais")}><span>Despesas gerais</span><strong>${currency.format(ministry.general)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "geral").length} lançamentos com finance_kind = geral.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas do núcleo de aulas")}><span>Núcleo de aulas</span><strong>${currency.format(ministry.classes)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "aulas" && record.type.toLocaleLowerCase("pt-BR") === "saida").length} saídas com finance_kind = aulas.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-general", "despesas gerais")}><span>Despesas gerais</span><strong>${currency.format(ministry.general)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "geral" && record.type.toLocaleLowerCase("pt-BR") === "saida").length} saídas com finance_kind = geral.</p></article>
           <article class="audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas")}><span>Entradas administrativas</span><strong>${currency.format(ministry.entries)}</strong><p>A base atual não possui registros com type = entrada.</p></article>
         </div>
         <div class="presentation-source-note presentation-source-warning">${icons.clock}<p><strong>Importante:</strong> essa base registra despesas administrativas e permanece separada das mensalidades do curso.</p></div>`,
@@ -741,16 +745,21 @@ function buildPresentationPages() {
     {
       theme: "flow",
       kicker: "Página 6 · Fluxo mensal",
-      title: "Comparativo do que entrou e do que saiu",
+      title: "Receita do curso x despesas das aulas",
       content: `
         <div class="presentation-chart-card">
-          <div class="legend"><span><i style="background:#307b67"></i>Entradas líquidas</span><span><i style="background:#b85543"></i>Saídas do Ministério</span></div>
+          <div class="presentation-chart-head">
+            <div class="legend"><span><i style="background:#006cfc"></i>Receita líquida do curso</span><span><i style="background:#b85543"></i>Despesas das aulas</span></div>
+            <div class="presentation-excluded-expense audit-clickable" ${auditAttributes("ministry-general", "despesas de outras áreas")}>
+              <span>Fora desta comparação</span><strong>${currency.format(ministry.general)}</strong><small>Outras áreas do Ministério</small>
+            </div>
+          </div>
           ${cashFlowComparisonChart(state.records, state.ministryRecords)}
         </div>
         <div class="presentation-metric-grid presentation-flow-summary">
-          <article class="audit-clickable" ${auditAttributes("combined-entries", "entradas no recorte")}><span>Entradas no recorte</span><strong>${currency.format(summary.credited + ministry.entries)}</strong><p>Valor Creditado do curso + entradas administrativas.</p></article>
-          <article class="audit-clickable" ${auditAttributes("ministry-exits", "saídas no recorte")}><span>Saídas no recorte</span><strong>${currency.format(ministry.exits)}</strong><p>Registros type = saída no CSV.</p></article>
-          <article class="audit-clickable ${comparisonDifference < 0 ? "presentation-alert-metric" : ""}" ${auditAttributes("comparison-difference", "diferença comparada")}><span>Diferença comparada</span><strong>${currency.format(comparisonDifference)}</strong><p>Comparação entre as duas bases; não equivale ao saldo bancário completo.</p></article>
+          <article class="audit-clickable" ${auditAttributes("course-credited", "receita líquida do curso")}><span>Receita líquida do curso</span><strong>${currency.format(summary.credited)}</strong><p>Somente o Valor Creditado que entrou na conta.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas das aulas")}><span>Despesas das aulas</span><strong>${currency.format(ministry.classes)}</strong><p>Somente saídas do núcleo “aulas”.</p></article>
+          <article class="audit-clickable ${comparisonDifference < 0 ? "presentation-alert-metric" : ""}" ${auditAttributes("comparison-difference", "resultado direto do curso")}><span>Resultado direto do curso</span><strong>${currency.format(comparisonDifference)}</strong><p>Receita líquida menos despesas diretamente ligadas às aulas.</p></article>
         </div>`,
     },
     {
@@ -787,6 +796,8 @@ function renderPresentation() {
       <div class="presentation-stage">
         <span class="presentation-orb presentation-orb-one"></span>
         <span class="presentation-orb presentation-orb-two"></span>
+        <img class="presentation-brand-crown" src="${crownLogo}" alt="" aria-hidden="true" />
+        <button class="presentation-stage-arrow presentation-stage-arrow-prev" data-presentation-action="prev" type="button" aria-label="Página anterior" ${state.presentationPage === 0 ? "disabled" : ""}>‹</button>
         <article class="presentation-slide">
         <div class="presentation-slide-head">
           <div><p class="presentation-kicker">${page.kicker}</p><h3>${page.title}</h3></div>
@@ -794,6 +805,7 @@ function renderPresentation() {
         </div>
         <div class="presentation-slide-content">${page.content}</div>
         </article>
+        <button class="presentation-stage-arrow presentation-stage-arrow-next" data-presentation-action="next" type="button" aria-label="Próxima página" ${state.presentationPage === pages.length - 1 ? "disabled" : ""}>›</button>
       </div>
       <footer class="presentation-controls">
         <button class="button presentation-control" data-presentation-action="prev" type="button" ${state.presentationPage === 0 ? "disabled" : ""}>‹ Anterior</button>
@@ -820,7 +832,8 @@ function renderPresentation() {
         else presentation?.requestFullscreen?.();
         return;
       }
-      state.presentationPage += action === "next" ? 1 : -1;
+      const nextPage = state.presentationPage + (action === "next" ? 1 : -1);
+      state.presentationPage = Math.min(Math.max(nextPage, 0), pages.length - 1);
       renderPresentation();
     });
   });
@@ -837,12 +850,15 @@ function renderApp() {
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar" aria-label="Navegação principal">
-        <div class="brand">
-          <div class="brand-mark">R</div>
-          <div class="brand-copy"><strong>Reino</strong><span>Financeiro</span></div>
+        <div class="brand brand-with-logo">
+          <div class="brand-logo-surface"><img class="brand-logo" src="${brandLogo}" alt="Ministério Sinais do Reino" /></div>
+          <span class="brand-product">Financeiro</span>
         </div>
+        <button class="mobile-menu-toggle" type="button" aria-expanded="false" aria-controls="side-navigation" aria-label="Abrir menu de navegação">
+          ${icons.menu}<span class="mobile-menu-close-icon">${icons.close}</span><b>Menu</b>
+        </button>
         <p class="side-label">Painel</p>
-        <nav class="side-nav">
+        <nav class="side-nav" id="side-navigation" aria-label="Seções do painel">
           <button class="nav-item ${state.activeView === "presentation" ? "active" : ""}" data-target="presentation" aria-current="${state.activeView === "presentation" ? "page" : "false"}">${icons.spark}<span>Apresentação</span></button>
           <button class="nav-item ${state.activeView === "overview" ? "active" : ""}" data-target="overview" aria-current="${state.activeView === "overview" ? "page" : "false"}">${icons.overview}<span>Visão geral</span></button>
           <button class="nav-item ${state.activeView === "participants" ? "active" : ""}" data-target="participants" aria-current="${state.activeView === "participants" ? "page" : "false"}">${icons.people}<span>Valores por pessoa</span></button>
@@ -850,6 +866,7 @@ function renderApp() {
           <button class="nav-item ${state.activeView === "ministry" ? "active" : ""}" data-target="ministry" aria-current="${state.activeView === "ministry" ? "page" : "false"}">${icons.money}<span>Finanças do Ministério</span></button>
           <button class="nav-item ${state.activeView === "transactions" ? "active" : ""}" data-target="transactions" aria-current="${state.activeView === "transactions" ? "page" : "false"}">${icons.rows}<span>Tabela</span></button>
         </nav>
+        <button class="mobile-menu-backdrop" type="button" aria-label="Fechar menu"></button>
         <div class="side-source">
           <div class="source-line"><i class="source-dot"></i>Fonte conectada</div>
           <p class="source-file">${safe(state.sourceName)}</p>
@@ -978,8 +995,11 @@ function renderApp() {
           <div class="flow-grid">
             <article class="card panel flow-card-full">
               <div class="panel-head">
-                <div><span class="chart-number">01</span><h3 class="panel-title">Entradas líquidas x saídas</h3><p class="panel-subtitle">Entradas usam o Valor Creditado dos alunos e eventuais entradas administrativas. Saídas usam os registros do finançassinaisdoreino.</p></div>
-                <div class="legend"><span><i style="background:#307b67"></i>Entradas</span><span><i style="background:#b85543"></i>Saídas</span></div>
+                <div><span class="chart-number">01</span><h3 class="panel-title">Receita do curso x despesas das aulas</h3><p class="panel-subtitle">Receita usa somente o Valor Creditado do curso. Despesa usa somente saídas com finance_kind = aulas.</p></div>
+                <div class="flow-panel-aside">
+                  <div class="legend"><span><i style="background:#006cfc"></i>Receita do curso</span><span><i style="background:#b85543"></i>Despesas das aulas</span></div>
+                  <div class="flow-excluded-expense audit-clickable" ${auditAttributes("ministry-general", "despesas de outras áreas")}><span>Outras áreas · fora do comparativo</span><strong>${currency.format(ministrySummary.general)}</strong></div>
+                </div>
               </div>
               ${cashFlowComparisonChart(state.records, state.ministryRecords)}
             </article>
@@ -1119,6 +1139,25 @@ function renderApp() {
 
 function bindAppEvents() {
   const appRoot = document.querySelector("#app");
+  const sidebar = document.querySelector(".sidebar");
+  const mobileMenuToggle = document.querySelector(".mobile-menu-toggle");
+  const closeMobileMenu = () => {
+    sidebar?.classList.remove("mobile-menu-open");
+    mobileMenuToggle?.setAttribute("aria-expanded", "false");
+    mobileMenuToggle?.setAttribute("aria-label", "Abrir menu de navegação");
+  };
+  mobileMenuToggle?.addEventListener("click", () => {
+    const willOpen = !sidebar.classList.contains("mobile-menu-open");
+    sidebar.classList.toggle("mobile-menu-open", willOpen);
+    mobileMenuToggle.setAttribute("aria-expanded", String(willOpen));
+    mobileMenuToggle.setAttribute("aria-label", willOpen ? "Fechar menu de navegação" : "Abrir menu de navegação");
+  });
+  document.querySelector(".mobile-menu-backdrop")?.addEventListener("click", closeMobileMenu);
+  appRoot.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !sidebar?.classList.contains("mobile-menu-open")) return;
+    closeMobileMenu();
+    mobileMenuToggle?.focus();
+  });
   const openAuditFromEvent = (event) => {
     const trigger = event.target.closest?.("[data-audit-key]");
     if (!trigger || !appRoot.contains(trigger)) return;
@@ -1128,9 +1167,23 @@ function bindAppEvents() {
   };
   appRoot.addEventListener("click", openAuditFromEvent);
   appRoot.addEventListener("keydown", openAuditFromEvent);
+  appRoot.addEventListener("keydown", (event) => {
+    if (state.activeView !== "presentation" || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    if (document.querySelector(".audit-breakdown-backdrop")) return;
+    const pages = buildPresentationPages();
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+    const nextPage = Math.min(Math.max(state.presentationPage + direction, 0), pages.length - 1);
+    if (nextPage === state.presentationPage) return;
+    event.preventDefault();
+    state.presentationPage = nextPage;
+    renderPresentation();
+  });
 
   document.querySelectorAll(".nav-item").forEach((button) => {
-    button.addEventListener("click", () => activateView(button.dataset.target, true));
+    button.addEventListener("click", () => {
+      activateView(button.dataset.target, true);
+      closeMobileMenu();
+    });
   });
 
   document.querySelector("#open-ministry-view").addEventListener("click", () => activateView("ministry", true));
@@ -1552,6 +1605,7 @@ function courseAuditBreakdown(key) {
       title: "Base completa do Curso de Libras",
       valueLabel: "Valor cadastrado nas linhas",
       formula: "Todos os lançamentos válidos da planilha, após as inclusões e exclusões solicitadas.",
+      relevance: "Define o tamanho financeiro total da turma e ajuda a conferir se todas as parcelas contratadas foram cadastradas. Não representa dinheiro disponível na conta.",
       predicate: () => true,
       value: (record) => record.receivable,
     },
@@ -1559,6 +1613,7 @@ function courseAuditBreakdown(key) {
       title: "Recebido líquido pelo Ministério",
       valueLabel: "Valor Creditado",
       formula: "Soma da coluna Valor Creditado nas linhas em que o crédito líquido é maior que zero.",
+      relevance: "É o dinheiro líquido realmente disponível para o Ministério. Por isso, este é o número correto para comparar a receita do curso com o custo das aulas.",
       predicate: (record) => record.credited > 0,
       value: (record) => record.credited,
     },
@@ -1566,6 +1621,7 @@ function courseAuditBreakdown(key) {
       title: "Pago, aguardando crédito",
       valueLabel: "Valor Pago sem crédito",
       formula: "Soma do Valor Pago quando Valor Pago > 0 e Valor Creditado = 0. São pagamentos no cartão que serão creditados posteriormente pela operadora.",
+      relevance: "Mostra dinheiro que o aluno já pagou, mas que a operadora ainda não repassou. Ele ajuda a prever o caixa sem confundir pagamento com saldo em conta.",
       predicate: (record) => record.paid > 0 && record.credited === 0,
       value: (record) => record.paid,
     },
@@ -1573,6 +1629,7 @@ function courseAuditBreakdown(key) {
       title: "Previsão de crédito de setembro e outubro",
       valueLabel: "Valor previsto",
       formula: "Soma do Valor Pago — ou do Valor a Receber quando ainda não houve pagamento — com crédito previsto para setembro ou outubro e Valor Creditado = 0.",
+      relevance: "Ajuda a planejar as entradas dos próximos meses, mantendo a previsão separada do dinheiro já recebido.",
       predicate: (record) => {
         const date = parseDate(record.expectedCreditAt);
         return Boolean(date && date >= forecastStartsAt && [9, 10].includes(date.getMonth() + 1) && record.credited === 0);
@@ -1583,6 +1640,7 @@ function courseAuditBreakdown(key) {
       title: "Crédito vencido a conciliar",
       valueLabel: "Valor Pago sem crédito",
       formula: "Soma do Valor Pago com previsão de crédito já encerrada, Valor Creditado = 0 e competência entre abril e outubro.",
+      relevance: "Sinaliza pagamentos cujo prazo de repasse terminou sem crédito registrado e que precisam ser conferidos com a operadora do cartão.",
       predicate: (record) => {
         const date = parseDate(record.expectedCreditAt);
         return Boolean(date && date < forecastStartsAt && requestedMonths.has(date.getMonth() + 1) && record.paid > 0 && record.credited === 0);
@@ -1593,6 +1651,7 @@ function courseAuditBreakdown(key) {
       title: "Inadimplência vencida",
       valueLabel: "Saldo em atraso",
       formula: "Por parcela vencida: Valor a Receber − Valor Pago. Entram somente saldos positivos.",
+      relevance: "Mede a receita vencida que não entrou por falta de pagamento e orienta as cobranças aos alunos.",
       predicate: (record) => {
         const date = parseDate(record.dueDate);
         return Boolean(date && date < now && record.receivable - record.paid > 0);
@@ -1603,6 +1662,7 @@ function courseAuditBreakdown(key) {
       title: "Valor total cadastrado",
       valueLabel: "Valor a Receber",
       formula: "Soma da coluna Valor a Receber de todos os lançamentos válidos.",
+      relevance: "Mostra o valor bruto contratado com os alunos e funciona como referência do potencial da turma, não como saldo bancário.",
       predicate: () => true,
       value: (record) => record.receivable,
     },
@@ -1610,6 +1670,7 @@ function courseAuditBreakdown(key) {
       title: "Pago pelos alunos",
       valueLabel: "Valor Pago",
       formula: "Soma da coluna Valor Pago. Este valor é informativo e não representa necessariamente dinheiro creditado na conta do Ministério.",
+      relevance: "Permite conferir o que os alunos efetivamente pagaram e separar esse momento do repasse líquido feito pela operadora.",
       predicate: (record) => record.paid > 0,
       value: (record) => record.paid,
     },
@@ -1617,6 +1678,7 @@ function courseAuditBreakdown(key) {
       title: "Tarifas e taxas do cartão",
       valueLabel: "Tarifa cobrada",
       formula: "Soma absoluta da coluna Despesa Financeira: tarifas e taxas de manutenção e processamento dos pagamentos no cartão.",
+      relevance: "Explica a diferença entre o valor pago pelo aluno e o líquido recebido pelo Ministério, além de revelar o custo de usar o cartão.",
       predicate: (record) => Math.abs(record.fee) > 0,
       value: (record) => Math.abs(record.fee),
     },
@@ -1634,6 +1696,7 @@ function courseAuditBreakdown(key) {
       title: `Inadimplência de ${personName}`,
       valueLabel: "Saldo em atraso",
       formula: "Parcelas desta pessoa com vencimento anterior à auditoria: Valor a Receber − Valor Pago.",
+      relevance: "Mostra exatamente quais parcelas desta pessoa precisam de cobrança e evita confundir atraso do aluno com atraso de repasse do cartão.",
       predicate: (record) => {
         const date = parseDate(record.dueDate);
         return record.donor === personName && Boolean(date && date < now && record.receivable - record.paid > 0);
@@ -1740,6 +1803,7 @@ function courseAuditBreakdown(key) {
     title: definition.title,
     source: state.sourceName,
     formula: definition.formula,
+    relevance: definition.relevance,
     valueLabel: definition.valueLabel,
     total,
     calculation: calculations[displayKey],
@@ -1763,30 +1827,35 @@ function ministryAuditBreakdown(key) {
       title: "Todos os lançamentos administrativos",
       valueLabel: "Valor das linhas",
       formula: "Todos os registros válidos da base administrativa do Ministério.",
+      relevance: "Apresenta o volume total registrado na base do Ministério e permite conferir a integridade dos lançamentos administrativos.",
       predicate: () => true,
     },
     "ministry-exits": {
       title: "Total de saídas registradas",
       valueLabel: "Valor da saída",
       formula: "Soma da coluna amount quando type = saída.",
+      relevance: "Dá a visão completa das saídas do Ministério, mas nem toda essa despesa pertence ao curso e, por isso, não deve ser toda abatida da receita das aulas.",
       predicate: (record) => record.type.toLocaleLowerCase("pt-BR") === "saida",
     },
     "ministry-classes": {
       title: "Despesas do núcleo de aulas",
       valueLabel: "Valor da despesa",
-      formula: "Soma da coluna amount quando finance_kind = aulas.",
-      predicate: (record) => record.financeKind.toLocaleLowerCase("pt-BR") === "aulas",
+      formula: "Soma da coluna amount quando finance_kind = aulas e type = saída.",
+      relevance: "É o custo diretamente ligado às aulas. Por isso, este é o valor correto para comparar com o Valor Creditado do curso.",
+      predicate: (record) => record.financeKind.toLocaleLowerCase("pt-BR") === "aulas" && record.type.toLocaleLowerCase("pt-BR") === "saida",
     },
     "ministry-general": {
       title: "Despesas gerais do Ministério",
       valueLabel: "Valor da despesa",
-      formula: "Soma da coluna amount quando finance_kind = geral.",
-      predicate: (record) => record.financeKind.toLocaleLowerCase("pt-BR") === "geral",
+      formula: "Soma da coluna amount quando finance_kind = geral e type = saída.",
+      relevance: "Pertence a outras áreas do Ministério. Continua visível para controle, mas fica fora do resultado direto do curso.",
+      predicate: (record) => record.financeKind.toLocaleLowerCase("pt-BR") === "geral" && record.type.toLocaleLowerCase("pt-BR") === "saida",
     },
     "ministry-entries": {
       title: "Entradas administrativas",
       valueLabel: "Valor da entrada",
       formula: "Soma da coluna amount quando type = entrada.",
+      relevance: "Mostra entradas que pertencem à base administrativa e evita que elas sejam confundidas com os créditos recebidos dos alunos.",
       predicate: (record) => record.type.toLocaleLowerCase("pt-BR") === "entrada",
     },
   };
@@ -1812,6 +1881,7 @@ function ministryAuditBreakdown(key) {
     title: definition.title,
     source: "finançassinaisdoreino.csv",
     formula: definition.formula,
+    relevance: definition.relevance,
     valueLabel: definition.valueLabel,
     total,
     calculation: [{ label: `${number.format(records.length)} lançamentos selecionados`, value: total }],
@@ -1861,6 +1931,7 @@ function comparisonAuditBreakdown(key) {
       title: "Entradas no recorte comparado",
       source: `${state.sourceName} + finançassinaisdoreino.csv`,
       formula: "Valor Creditado do curso + registros administrativos cujo type = entrada.",
+      relevance: "Ajuda a enxergar entradas de bases diferentes sem tratá-las como se tivessem a mesma origem.",
       valueLabel: "Valor da entrada",
       total: summary.credited + ministry.entries,
       calculation: [
@@ -1877,30 +1948,31 @@ function comparisonAuditBreakdown(key) {
     };
   }
   if (key === "comparison-difference") {
-    const entries = summary.credited + ministry.entries;
+    const result = summary.credited - ministry.classes;
     return {
-      title: "Diferença entre entradas e saídas",
+      title: "Resultado direto do Curso de Libras",
       source: `${state.sourceName} + finançassinaisdoreino.csv`,
-      formula: "Entradas líquidas do recorte − saídas administrativas do recorte. Não equivale ao saldo bancário completo.",
-      valueLabel: "Efeito na diferença",
-      total: entries - ministry.exits,
+      formula: "Valor Creditado do curso − despesas onde finance_kind = aulas e type = saída. Despesas gerais não entram nesta comparação.",
+      relevance: "Mostra se a receita líquida do curso cobre os custos diretamente ligados às aulas. As demais despesas pertencem a outras áreas e permanecem fora desta conta.",
+      valueLabel: "Resultado direto do curso",
+      total: result,
       calculation: [
-        { label: "Entradas no recorte", value: entries },
-        { operator: "−", label: "Saídas do Ministério", value: ministry.exits },
+        { label: "Receita líquida do curso", value: summary.credited },
+        { operator: "−", label: "Despesas das aulas", value: ministry.classes },
       ],
-      resultLabel: "Diferença comparada",
+      resultLabel: "Resultado direto do curso",
       groupTitle: "Valores usados na comparação",
-      groupHint: "Esta conta compara duas bases diferentes e não representa o saldo bancário completo.",
+      groupHint: "Somente a receita do curso e os custos das aulas formam este resultado.",
       groups: [
-        { label: "Entradas no recorte", total: entries, lines: [{ label: "Curso + entradas administrativas", context: "Operação: somar", value: entries }] },
-        { label: "Saídas do Ministério (subtração)", total: -ministry.exits, lines: [{ label: "Despesas administrativas", context: "Efeito negativo na comparação", value: -ministry.exits }] },
+        { label: "Receita líquida do curso", total: summary.credited, lines: [{ label: "Valor Creditado", context: state.sourceName, value: summary.credited }] },
+        { label: "Despesas das aulas (subtração)", total: -ministry.classes, lines: [{ label: "Núcleo aulas", context: "finance_kind = aulas · type = saída", value: -ministry.classes }] },
       ],
       columns: ["Componente", "Base de origem", "Operação", "Efeito na diferença"],
       rows: [
-        ["Entradas no recorte", `${safe(state.sourceName)} + finanças administrativas`, "Somar", `<strong>${currency.format(entries)}</strong>`],
-        ["Saídas do Ministério", "finançassinaisdoreino.csv", "Subtrair", `<strong>${currency.format(-ministry.exits)}</strong>`],
+        ["Receita líquida do curso", safe(state.sourceName), "Somar", `<strong>${currency.format(summary.credited)}</strong>`],
+        ["Despesas das aulas", "finançassinaisdoreino.csv", "Subtrair", `<strong>${currency.format(-ministry.classes)}</strong>`],
       ],
-      note: "Esta comparação reúne duas bases de finalidades diferentes e serve apenas para leitura gerencial.",
+      note: `As despesas gerais de ${currency.format(ministry.general)} pertencem a outras áreas e foram mantidas fora desta comparação.`,
     };
   }
   return null;
@@ -1977,6 +2049,10 @@ function openAuditBreakdown(key) {
         <div class="audit-criterion">
           <div><span>Critério aplicado</span><p>${safe(breakdown.formula)}</p></div>
           <small>Fonte: <b>${safe(breakdown.source)}</b></small>
+        </div>
+        <div class="audit-relevance">
+          <span class="audit-relevance-icon">${icons.spark}</span>
+          <div><span>Por que este número é relevante</span><p>${safe(breakdown.relevance || "Este valor ajuda a conferir a origem e o efeito financeiro dos lançamentos selecionados.")}</p></div>
         </div>
         ${renderAuditCalculation(breakdown)}
         <section class="audit-composition" aria-labelledby="audit-composition-title">
