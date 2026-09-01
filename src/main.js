@@ -1,12 +1,25 @@
 import { readFirstSheetRows } from "./xlsx-reader.js";
 import { excludedParticipants, manualRecords } from "./manual-records.js";
-import { parseCsv } from "./csv-reader.js";
+import { registeredMinistryEntries } from "./registered-ministry-entries.js";
 import "./style.css";
 
 const sourceWorkbook = new URL("../Libras.xlsx", import.meta.url);
-const ministryFinanceCsv = new URL("../finançassinaisdoreino.csv", import.meta.url);
+const ministryFinanceJson = new URL("../finançassinaisdoreino.json", import.meta.url);
 const brandLogo = new URL("./logos/logo.svg", import.meta.url);
 const crownLogo = new URL("./logos/coroa.svg", import.meta.url);
+
+const yearEndPlan = {
+  months: ["Setembro", "Outubro", "Novembro", "Dezembro"],
+  fixedExpenses: [
+    { label: "Café e comida", monthly: 500, reason: "Alimentação prevista para as atividades até dezembro." },
+    { label: "Uber essencial", monthly: 200, reason: "Deslocamentos essenciais previstos até dezembro." },
+    { label: "Ajuda Éder", monthly: 150, reason: "Ajuda mensal prevista para Éder." },
+  ],
+  courseExpenses: 4000,
+  certainCourseCredit: 2200,
+  uncertainDelinquency: 1600,
+  alexMonthlyContribution: 500,
+};
 
 const state = {
   records: [],
@@ -41,10 +54,9 @@ const state = {
 const viewTitles = {
   presentation: "Apresentação financeira",
   overview: "Auditoria financeira",
-  participants: "Valores por aluno",
-  cashflow: "Fluxo mensal",
-  ministry: "Finanças do Ministério",
-  transactions: "Tabela financeira",
+  participants: "Curso e alunos",
+  cashflow: "Fluxo e projeções",
+  ministry: "Ministério e despesas",
 };
 
 const icons = {
@@ -85,8 +97,17 @@ function toNumber(value) {
   return Number.parseFloat(normalized) || 0;
 }
 
-function readMinistryFinance(csvText) {
-  const records = parseCsv(csvText)
+function readMinistryFinance(jsonData) {
+  const sourceRecords = Array.isArray(jsonData) ? jsonData : jsonData?.records;
+  if (!Array.isArray(sourceRecords)) throw new Error("O arquivo finançassinaisdoreino.json não contém uma lista válida de lançamentos.");
+
+  const registeredIds = new Set(sourceRecords.map((record) => String(record.id || "")));
+  const allSourceRecords = [
+    ...sourceRecords,
+    ...registeredMinistryEntries.filter((record) => !registeredIds.has(record.id)),
+  ];
+
+  const records = allSourceRecords
     .map((row, index) => ({
       id: String(row.id || `MINISTRY-${index + 1}`).trim(),
       financeKind: String(row.finance_kind || "Não informado").trim(),
@@ -106,7 +127,7 @@ function readMinistryFinance(csvText) {
     .filter((record) => record.date && record.amount > 0)
     .sort((a, b) => b.date.localeCompare(a.date) || a.category.localeCompare(b.category, "pt-BR"));
 
-  if (!records.length) throw new Error("Não encontrei lançamentos válidos em finançassinaisdoreino.csv.");
+  if (!records.length) throw new Error("Não encontrei lançamentos válidos em finançassinaisdoreino.json.");
   state.ministryRecords = records;
 }
 
@@ -132,6 +153,24 @@ function summarizeMinistry(records) {
 function formatIsoDate(value) {
   const [year, month, day] = String(value || "").split("-");
   return year && month && day ? `${day}/${month}/${year}` : "—";
+}
+
+function ministryPeriodLabel(records) {
+  const dates = records
+    .map((record) => record.date ? new Date(`${record.date}T12:00:00`) : null)
+    .filter((date) => date && !Number.isNaN(date.getTime()))
+    .sort((a, b) => a - b);
+  if (!dates.length) return "Período não informado";
+  const formatMonth = (date) => {
+    const label = new Intl.DateTimeFormat("pt-BR", { month: "short" }).format(date).replace(".", "");
+    return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  };
+  const first = dates[0];
+  const last = dates.at(-1);
+  if (first.getFullYear() === last.getFullYear()) {
+    return `${formatMonth(first)} — ${formatMonth(last)}/${last.getFullYear()}`;
+  }
+  return `${formatMonth(first)}/${first.getFullYear()} — ${formatMonth(last)}/${last.getFullYear()}`;
 }
 
 function parseDate(value) {
@@ -271,6 +310,53 @@ function groupCashFlowByMonth(records, ministryRecords) {
   });
 
   return [...groups.values()].sort((a, b) => a.date - b.date);
+}
+
+function groupMinistryFlowByMonth(ministryRecords) {
+  const groups = new Map();
+  ministryRecords.forEach((record) => {
+    const date = record.date ? new Date(`${record.date}T12:00:00`) : null;
+    if (!date || Number.isNaN(date.getTime())) return;
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    if (!groups.has(key)) groups.set(key, { key, date, income: 0, outgoing: 0 });
+    const group = groups.get(key);
+    const type = record.type.toLocaleLowerCase("pt-BR");
+    if (type === "entrada") group.income += record.amount;
+    if (type === "saida") group.outgoing += record.amount;
+  });
+  return [...groups.values()].sort((a, b) => a.date - b.date);
+}
+
+function groupConsolidatedFlowByMonth(records, ministryRecords) {
+  const groups = new Map();
+  const ensureGroup = (date) => {
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    if (!groups.has(key)) groups.set(key, { key, date, courseIncome: 0, administrativeIncome: 0, outgoing: 0 });
+    return groups.get(key);
+  };
+
+  records.forEach((record) => {
+    const date = parseDate(record.creditedAt);
+    if (!date || record.credited <= 0) return;
+    ensureGroup(date).courseIncome += record.credited;
+  });
+
+  ministryRecords.forEach((record) => {
+    const date = record.date ? new Date(`${record.date}T12:00:00`) : null;
+    if (!date || Number.isNaN(date.getTime())) return;
+    const group = ensureGroup(date);
+    const type = record.type.toLocaleLowerCase("pt-BR");
+    if (type === "entrada") group.administrativeIncome += record.amount;
+    if (type === "saida") group.outgoing += record.amount;
+  });
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      income: group.courseIncome + group.administrativeIncome,
+      net: group.courseIncome + group.administrativeIncome - group.outgoing,
+    }))
+    .sort((a, b) => a.date - b.date);
 }
 
 function groupByMethod(records) {
@@ -544,6 +630,40 @@ function cashFlowComparisonChart(records, ministryRecords) {
     </div>`;
 }
 
+function consolidatedFlowComparisonChart(records, ministryRecords) {
+  const groups = groupConsolidatedFlowByMonth(records, ministryRecords);
+  const max = Math.max(...groups.flatMap((item) => [item.income, item.outgoing]), 1);
+  const monthFormatter = new Intl.DateTimeFormat("pt-BR", { month: "short" });
+  return `
+    <div class="monthly-chart consolidated-monthly-chart" style="--columns:${groups.length}">
+      ${groups.map((item) => {
+        const incomeHeight = Math.max((item.income / max) * 100, item.income ? 2 : 0);
+        const outgoingHeight = Math.max((item.outgoing / max) * 100, item.outgoing ? 2 : 0);
+        const courseShare = item.income ? (item.courseIncome / item.income) * 100 : 0;
+        const administrativeShare = item.income ? (item.administrativeIncome / item.income) * 100 : 0;
+        return `<div class="month-group">
+          <div class="bar-wrap" style="--height:${incomeHeight}%">
+            <div class="bar bar-stacked-income" style="height:${incomeHeight}%;opacity:${item.income ? 1 : 0}">
+              <span class="bar-income-administrative" style="height:${administrativeShare}%"></span>
+              <span class="bar-income-course" style="height:${courseShare}%"></span>
+            </div>
+            <div class="bar-tooltip">Crédito do curso: <strong>${currency.format(item.courseIncome)}</strong><br>Entrada administrativa: <strong>${currency.format(item.administrativeIncome)}</strong><br>Total que entrou: <strong>${currency.format(item.income)}</strong></div>
+          </div>
+          <div class="bar-wrap" style="--height:${outgoingHeight}%">
+            <div class="bar bar-outgoing" style="height:${outgoingHeight}%;opacity:${item.outgoing ? 1 : 0}"></div>
+            <div class="bar-tooltip">Todas as saídas do Ministério<br><strong>${currency.format(item.outgoing)}</strong></div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+    <div class="chart-labels" style="--columns:${groups.length}">
+      ${groups.map((item) => `<span>${monthFormatter.format(item.date).replace(".", "")}</span>`).join("")}
+    </div>
+    <div class="presentation-monthly-net" style="--columns:${groups.length}">
+      ${groups.map((item) => `<span class="${item.net < 0 ? "negative" : "positive"}" title="Resultado registrado de ${safe(monthFormatter.format(item.date))}">${item.net >= 0 ? "+" : ""}${currency.format(item.net)}</span>`).join("")}
+    </div>`;
+}
+
 function groupSeriesByMonth(records, dateField, valueSelector, predicate = () => true) {
   const groups = new Map();
   records.forEach((record) => {
@@ -634,7 +754,299 @@ function methodsChart(records) {
     </div>`;
 }
 
-function buildPresentationPages() {
+const compactCurrency = new Intl.NumberFormat("pt-BR", {
+  style: "currency",
+  currency: "BRL",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+function monthShort(date) {
+  return new Intl.DateTimeFormat("pt-BR", { month: "short" }).format(date).replace(".", "");
+}
+
+function operationalMonthlyChart(groups, series, options = {}) {
+  if (!groups.length) return `<div class="chart-empty">Sem valores para este gráfico.</div>`;
+  const maximum = Math.max(...groups.flatMap((group) => series.map((item) => Math.abs(item.value(group)))), 1);
+  return `<div class="audit-chart-scroll"><div class="audit-month-chart" style="--columns:${groups.length}">
+    ${groups.map((group) => {
+      const result = options.result?.(group);
+      const auditKey = options.auditKey?.(group);
+      const tag = auditKey ? "button" : "div";
+      return `<${tag} class="audit-month-column ${auditKey ? "audit-clickable" : ""}" ${auditKey ? `${auditAttributes(auditKey, `movimentações de ${monthShort(group.date)}`)} type="button"` : ""}>
+        <div class="audit-month-bars">
+          ${series.map((item) => {
+            const value = item.value(group);
+            const height = Math.max((Math.abs(value) / maximum) * 100, value ? 3 : 0);
+            return `<div class="audit-bar-slot" title="${safe(item.label)}: ${currency.format(value)}">
+              <span class="audit-bar-value">${value ? compactCurrency.format(value) : "—"}</span>
+              <i class="audit-data-bar ${safe(item.className)}" style="height:${height}%"></i>
+            </div>`;
+          }).join("")}
+        </div>
+        <strong class="audit-month-label">${safe(monthShort(group.date))}</strong>
+        ${typeof result === "number" ? `<span class="audit-month-result ${result < 0 ? "negative" : "positive"}">${result >= 0 ? "+" : ""}${currency.format(result)}</span>` : ""}
+      </${tag}>`;
+    }).join("")}
+  </div></div>`;
+}
+
+function operationalConsolidatedFlowChart(records, ministryRecords) {
+  const groups = groupConsolidatedFlowByMonth(records, ministryRecords);
+  return operationalMonthlyChart(groups, [
+    { label: "Entradas totais", className: "audit-bar-income", value: (item) => item.income },
+    { label: "Saídas totais", className: "audit-bar-expense", value: (item) => item.outgoing },
+  ], { result: (item) => item.net, auditKey: (item) => `flow-general:${item.key}` });
+}
+
+function operationalCourseFlowChart(records, ministryRecords) {
+  const groups = groupCashFlowByMonth(records, ministryRecords).map((item) => ({ ...item, net: item.income - item.outgoing }));
+  return operationalMonthlyChart(groups, [
+    { label: "Creditado pelo curso", className: "audit-bar-course", value: (item) => item.income },
+    { label: "Despesas das aulas", className: "audit-bar-classes", value: (item) => item.outgoing },
+  ], { result: (item) => item.net, auditKey: (item) => `flow-course:${item.key}` });
+}
+
+function buildPendingAuditByMonth(records) {
+  const groups = new Map();
+  const ensure = (date) => {
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    if (!groups.has(key)) groups.set(key, { key, date, operator: 0, overdue: 0, future: 0 });
+    return groups.get(key);
+  };
+  records.forEach((record) => {
+    const expectedDate = parseDate(record.expectedCreditAt);
+    const dueDate = parseDate(record.dueDate);
+    const unpaid = Math.max(record.receivable - record.paid, 0);
+    if (record.paid > 0 && record.credited === 0 && expectedDate) ensure(expectedDate).operator += record.paid;
+    if (unpaid > 0 && dueDate) {
+      if (dueDate < new Date()) ensure(dueDate).overdue += unpaid;
+      else ensure(dueDate).future += unpaid;
+    }
+  });
+  return [...groups.values()].sort((a, b) => a.date - b.date);
+}
+
+function pendingAuditChart(records) {
+  const groups = buildPendingAuditByMonth(records);
+  return operationalMonthlyChart(groups, [
+    { label: "Aguardando operadora", className: "audit-bar-operator", value: (item) => item.operator },
+    { label: "Vencido com aluno", className: "audit-bar-overdue", value: (item) => item.overdue },
+    { label: "Pagamento futuro", className: "audit-bar-future", value: (item) => item.future },
+  ], { auditKey: (item) => `flow-pending:${item.key}` });
+}
+
+function groupMinistryExpensesByMonth(records) {
+  const groups = new Map();
+  records.filter((record) => record.type.toLocaleLowerCase("pt-BR") === "saida").forEach((record) => {
+    const date = record.date ? new Date(`${record.date}T12:00:00`) : null;
+    if (!date || Number.isNaN(date.getTime())) return;
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    if (!groups.has(key)) groups.set(key, { key, date, classes: 0, general: 0 });
+    const group = groups.get(key);
+    if (record.financeKind.toLocaleLowerCase("pt-BR") === "aulas") group.classes += record.amount;
+    else group.general += record.amount;
+  });
+  return [...groups.values()].map((group) => ({ ...group, total: group.classes + group.general })).sort((a, b) => a.date - b.date);
+}
+
+function ministryExpenseTrendChart(records) {
+  const groups = groupMinistryExpensesByMonth(records);
+  return operationalMonthlyChart(groups, [
+    { label: "Despesas das aulas", className: "audit-bar-classes", value: (item) => item.classes },
+    { label: "Outras áreas", className: "audit-bar-general", value: (item) => item.general },
+  ], { result: (item) => -item.total, auditKey: (item) => `flow-expense:${item.key}` });
+}
+
+function expenseCategoryAuditChart(records) {
+  const groups = groupMinistryExpenses(records);
+  const maximum = Math.max(...groups.map((group) => group.total), 1);
+  return `<div class="expense-ranking-chart">
+    ${groups.map((group, index) => {
+      const percent = (group.total / maximum) * 100;
+      const totalExpenses = groups.reduce((total, item) => total + item.total, 0) || 1;
+      const share = (group.total / totalExpenses) * 100;
+      const auditKey = `ministry-category:${encodeURIComponent(group.financeKind || group.kind)}:${encodeURIComponent(group.category)}`;
+      const kindClass = group.kind.toLocaleLowerCase("pt-BR") === "aulas" ? "expense-kind-classes" : "expense-kind-general";
+      return `<button class="expense-ranking-row ${kindClass} audit-clickable" ${auditAttributes(auditKey, `despesas de ${group.category}`)} type="button">
+        <span class="expense-ranking-index">${String(index + 1).padStart(2, "0")}</span>
+        <span class="expense-ranking-copy"><strong>${safe(group.category)}</strong><small>${safe(group.kind)} · ${number.format(group.records.length)} ${group.records.length === 1 ? "lançamento" : "lançamentos"}</small><i><b style="width:${percent}%"></b></i></span>
+        <span class="expense-ranking-total"><strong>${currency.format(group.total)}</strong><small>${share.toFixed(1).replace(".", ",")}% das saídas</small></span>
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function projectionScenarioChart() {
+  const plan = planningTotals();
+  const steps = [
+    { label: "Entrada certa", value: yearEndPlan.certainCourseCredit, className: "positive", key: "plan-certain-recovery" },
+    { label: "Despesas planejadas", value: -plan.totalExpenses, className: "negative", key: "plan-year-expenses" },
+    { label: "Cenário confirmado", value: plan.certainDeficit, className: "result", key: "plan-deficit-base" },
+    { label: "Possível Alex", value: plan.alexContribution, className: "uncertain", key: "plan-alex" },
+    { label: "Inadimplência incerta", value: yearEndPlan.uncertainDelinquency, className: "uncertain", key: "plan-uncertain-recovery" },
+  ];
+  const maximum = Math.max(...steps.map((step) => Math.abs(step.value)), 1);
+  return `<div class="projection-waterfall">
+    ${steps.map((step) => `<button class="projection-step projection-${step.className} audit-clickable" ${auditAttributes(step.key, step.label)} type="button">
+      <span>${safe(step.label)}</span>
+      <div class="projection-axis"><i style="height:${Math.max((Math.abs(step.value) / maximum) * 100, 5)}%"></i></div>
+      <strong>${step.value > 0 ? "+" : ""}${currency.format(step.value)}</strong>
+    </button>`).join("")}
+  </div>`;
+}
+
+function normalizeFinancialText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR");
+}
+
+function ministryRecordText(record) {
+  return normalizeFinancialText([
+    record.category,
+    record.eventTitle,
+    record.name,
+    record.specification,
+    record.description,
+    record.paymentDetails,
+  ].filter(Boolean).join(" "));
+}
+
+function isInterpretationExpense(record) {
+  return record.type.toLocaleLowerCase("pt-BR") === "saida" && ministryRecordText(record).includes("interpret");
+}
+
+function isMixedInterpretationExpense(record) {
+  const text = ministryRecordText(record);
+  return isInterpretationExpense(record) && (text.includes("alimentacao") || text.includes("oferta"));
+}
+
+function groupMinistryExpenses(records) {
+  const groups = new Map();
+  records
+    .filter((record) => record.type.toLocaleLowerCase("pt-BR") === "saida")
+    .forEach((record) => {
+      const key = `${record.financeKind}::${record.category}`;
+      if (!groups.has(key)) groups.set(key, { kind: record.financeKind, category: record.category, total: 0, records: [], reasons: new Set() });
+      const group = groups.get(key);
+      const reason = record.specification || record.description || record.name || record.eventTitle || record.category;
+      group.total += record.amount;
+      group.records.push(record);
+      if (reason) group.reasons.add(reason.replace(/\s+/g, " ").trim());
+    });
+  return [...groups.values()].sort((a, b) => b.total - a.total || a.category.localeCompare(b.category, "pt-BR"));
+}
+
+function planningTotals() {
+  const months = yearEndPlan.months.length;
+  const fixedGeneral = yearEndPlan.fixedExpenses.reduce((total, expense) => total + expense.monthly * months, 0);
+  const alexContribution = yearEndPlan.alexMonthlyContribution * months;
+  const totalExpenses = yearEndPlan.courseExpenses + fixedGeneral;
+  const certainDeficit = yearEndPlan.certainCourseCredit - totalExpenses;
+  const deficitWithAlex = certainDeficit + alexContribution;
+  const potentialDeficit = deficitWithAlex + yearEndPlan.uncertainDelinquency;
+  return { months, fixedGeneral, alexContribution, totalExpenses, certainDeficit, deficitWithAlex, potentialDeficit };
+}
+
+function renderPlanningView(summary, ministrySummary) {
+  const directInterpretation = state.ministryRecords.filter((record) => isInterpretationExpense(record) && !isMixedInterpretationExpense(record));
+  const mixedInterpretation = state.ministryRecords.filter(isMixedInterpretationExpense);
+  const directInterpretationTotal = directInterpretation.reduce((total, record) => total + record.amount, 0);
+  const mixedInterpretationTotal = mixedInterpretation.reduce((total, record) => total + record.amount, 0);
+  const expenseGroups = groupMinistryExpenses(state.ministryRecords);
+  const plan = planningTotals();
+  const courseResult = summary.credited - ministrySummary.classes;
+  const ministryResult = ministrySummary.entries - ministrySummary.exits;
+  const interpretationRows = directInterpretation.map((record) => {
+    const reason = record.specification || record.description || record.name || "Interpretação registrada";
+    return `<tr><td>${safe(formatIsoDate(record.date))}</td><td><strong>${safe(record.name || record.category)}</strong></td><td>${safe(reason)}</td><td>${safe(record.paymentMethod)}</td><td class="money money-pending">${currency.format(record.amount)}</td></tr>`;
+  }).join("");
+  const expenseRows = expenseGroups.map((group) => {
+    const reasons = [...group.reasons];
+    const visibleReasons = reasons.slice(0, 3).join(" · ");
+    const remaining = reasons.length - 3;
+    return `<tr>
+      <td><span class="ministry-kind">${safe(group.kind)}</span></td>
+      <td><strong>${safe(group.category)}</strong></td>
+      <td class="planning-reason">${safe(visibleReasons)}${remaining > 0 ? ` <b>+ ${remaining} outros motivos</b>` : ""}</td>
+      <td>${number.format(group.records.length)} ${group.records.length === 1 ? "lançamento" : "lançamentos"}</td>
+      <td class="money money-pending">${currency.format(group.total)}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <section class="planning-section app-view" id="planning" data-view="planning">
+      <div class="planning-heading">
+        <div><p class="eyebrow">Realizado e projetado</p><h2 class="section-title">Entradas, saídas e plano até dezembro</h2><p class="section-copy">Valores realizados vêm das bases. O plano de setembro a dezembro aparece separado e identificado como projeção.</p></div>
+        <span class="planning-basis-badge">Auditoria por origem</span>
+      </div>
+
+      <div class="planning-scope-grid">
+        <article class="planning-scope-card planning-income audit-clickable" ${auditAttributes("course-credited", "entrada geral realizada do curso")}><span>Entrada geral do curso</span><strong>${currency.format(summary.credited)}</strong><p>Valor Creditado líquido na planilha do curso.</p><small>Base: ${safe(state.sourceName)}</small></article>
+        <article class="planning-scope-card planning-expense audit-clickable" ${auditAttributes("ministry-classes", "saída geral realizada do curso")}><span>Saída geral do curso</span><strong>${currency.format(ministrySummary.classes)}</strong><p>Despesas registradas no núcleo “aulas”.</p><small>Base: finançassinaisdoreino.json</small></article>
+        <article class="planning-scope-card planning-income audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas do Ministério")}><span>Entradas administrativas</span><strong>${currency.format(ministrySummary.entries)}</strong><p>R$ 500 de verba missionária para Alex + R$ 1.000 do Ministério por mês.</p><small>R$ 1.500/mês · janeiro a setembro de 2026</small></article>
+        <article class="planning-scope-card planning-expense audit-clickable" ${auditAttributes("ministry-exits", "saída geral registrada do Ministério")}><span>Saída geral do Ministério</span><strong>${currency.format(ministrySummary.exits)}</strong><p>Todas as saídas: aulas e despesas gerais.</p><small>O curso já está incluído neste total</small></article>
+      </div>
+
+      <div class="planning-result-strip">
+        <div><span>Resultado realizado do curso</span><strong class="${courseResult < 0 ? "planning-negative" : "planning-positive"}">${currency.format(courseResult)}</strong><small>Entrada creditada − despesas das aulas</small></div>
+        <div><span>Resultado da base do Ministério</span><strong class="${ministryResult < 0 ? "planning-negative" : "planning-positive"}">${currency.format(ministryResult)}</strong><small>Entradas JSON − todas as saídas JSON</small></div>
+        <p><b>Não some as duas saídas:</b> os ${currency.format(ministrySummary.classes)} do curso já fazem parte dos ${currency.format(ministrySummary.exits)} do Ministério.</p>
+      </div>
+
+      <article class="card planning-interpretation-card">
+        <div class="planning-card-head">
+          <div><p class="eyebrow">Campo específico</p><h3 class="panel-title">Interpretação de culto</h3><p class="panel-subtitle">Somente pagamentos identificados diretamente como interpretação ou intérprete.</p></div>
+          <button class="planning-focus-total audit-clickable" ${auditAttributes("ministry-interpretation", "pagamentos diretos de interpretação")} type="button"><span>Total identificado</span><strong>${currency.format(directInterpretationTotal)}</strong><small>${number.format(directInterpretation.length)} pagamentos</small></button>
+        </div>
+        <div class="table-wrap planning-table-wrap"><table class="planning-detail-table"><thead><tr><th>Data</th><th>Intérprete / destino</th><th>Por que foi pago</th><th>Meio</th><th>Valor</th></tr></thead><tbody>${interpretationRows || `<tr><td colspan="5" class="empty-state">Nenhum pagamento de interpretação identificado.</td></tr>`}</tbody></table></div>
+        ${mixedInterpretation.length ? `<div class="planning-mixed-note audit-clickable" ${auditAttributes("ministry-interpretation-mixed", "lançamento misto que inclui interpretação")}><span>${icons.clock}</span><div><strong>${currency.format(mixedInterpretationTotal)} em lançamento misto</strong><p>“Alimentação, oferta e intérprete” inclui interpretação, mas o JSON não separa quanto desse valor foi pago ao intérprete. Por isso, ele não foi somado aos ${currency.format(directInterpretationTotal)}.</p></div></div>` : ""}
+      </article>
+
+      <article class="card planning-expense-detail-card">
+        <div class="planning-card-head"><div><p class="eyebrow">Detalhamento realizado</p><h3 class="panel-title">Quanto foi gasto e por quê</h3><p class="panel-subtitle">Todas as saídas do JSON agrupadas por núcleo e categoria, com os motivos registrados.</p></div><strong class="planning-card-total">${currency.format(ministrySummary.exits)}</strong></div>
+        <div class="table-wrap planning-table-wrap"><table class="planning-expense-table"><thead><tr><th>Núcleo</th><th>Categoria</th><th>Motivos registrados</th><th>Quantidade</th><th>Total</th></tr></thead><tbody>${expenseRows}</tbody></table></div>
+      </article>
+
+      <div class="planning-projection-label"><p class="eyebrow">Planejamento informado</p><h3 class="section-title">Plano de despesas fixas até dezembro</h3><p>Projeções gerenciais — não são lançamentos realizados no JSON.</p></div>
+      <div class="planning-fixed-layout">
+        <article class="card planning-fixed-card audit-clickable" ${auditAttributes("plan-fixed-general", "plano de despesas gerais fixas")}>
+          <div class="planning-card-head"><div><h3 class="panel-title">Despesas gerais fixas</h3><p class="panel-subtitle">Setembro, outubro, novembro e dezembro</p></div><strong class="planning-card-total">${currency.format(plan.fixedGeneral)}</strong></div>
+          <div class="planning-fixed-list">${yearEndPlan.fixedExpenses.map((expense) => `<div><span><strong>${safe(expense.label)}</strong><small>${safe(expense.reason)}</small></span><b>${currency.format(expense.monthly)}/mês</b><em>${currency.format(expense.monthly * plan.months)}</em></div>`).join("")}</div>
+          <div class="planning-fixed-equation">${currency.format(850)} × ${plan.months} meses = <strong>${currency.format(plan.fixedGeneral)}</strong></div>
+        </article>
+        <article class="card planning-year-summary audit-clickable" ${auditAttributes("plan-year-expenses", "resumo das despesas até o final do ano")}>
+          <span>Resumo de despesas até o final do ano</span>
+          <div><small>Curso</small><strong>${currency.format(yearEndPlan.courseExpenses)}</strong></div>
+          <div><small>Despesas gerais</small><strong>${currency.format(plan.fixedGeneral)}</strong></div>
+          <footer><small>Total planejado</small><strong>${currency.format(plan.totalExpenses)}</strong></footer>
+        </article>
+      </div>
+
+      <div class="planning-scenario-grid">
+        <article class="card planning-recovery-card audit-clickable" ${auditAttributes("plan-certain-recovery", "crédito certo a receber do curso")}><span>Crédito certo a receber</span><strong>${currency.format(yearEndPlan.certainCourseCredit)}</strong><p>Entrada concreta informada para o curso.</p><small>Considerada no cenário real</small></article>
+        <article class="card planning-recovery-card planning-uncertain audit-clickable" ${auditAttributes("plan-uncertain-recovery", "inadimplência que talvez seja recuperada")}><span>Recebimento incerto</span><strong>${currency.format(yearEndPlan.uncertainDelinquency)}</strong><p>Inadimplência do curso que talvez não seja recuperada.</p><small>Não entra no cenário real</small></article>
+        <article class="card planning-recovery-card audit-clickable" ${auditAttributes("plan-alex", "possível entrada mensal explicada por Alex")}><span>Possível entrada — Alex</span><strong>${currency.format(plan.alexContribution)}</strong><p>${currency.format(yearEndPlan.alexMonthlyContribution)} por mês durante quatro meses.</p><small>A confirmar</small></article>
+      </div>
+
+      <article class="planning-scenario-card">
+        <div class="planning-scenario-head"><div><p class="eyebrow">Cenário real</p><h3>Projeção do saldo até dezembro</h3></div><span>Valores informados</span></div>
+        <div class="planning-scenario-flow">
+          <div><span>Despesas planejadas</span><strong>− ${currency.format(plan.totalExpenses)}</strong><small>Curso + despesas gerais</small></div>
+          <i>+</i><div><span>Entrada concreta</span><strong>${currency.format(yearEndPlan.certainCourseCredit)}</strong><small>Crédito certo do curso</small></div>
+          <i>=</i><div class="planning-scenario-result audit-clickable" ${auditAttributes("plan-deficit-base", "saldo negativo do cenário real")}><span>Saldo real projetado</span><strong>${currency.format(plan.certainDeficit)}</strong><small>Déficit sem contar Alex e inadimplência</small></div>
+        </div>
+        <div class="planning-scenario-alternatives">
+          <div class="audit-clickable" ${auditAttributes("plan-deficit-alex", "saldo com a possível entrada de Alex")}><span>Se Alex acrescentar ${currency.format(plan.alexContribution)}</span><strong>${currency.format(plan.deficitWithAlex)}</strong><small>Déficit ainda previsto</small></div>
+          <div class="audit-clickable" ${auditAttributes("plan-deficit-potential", "saldo potencial recuperando também a inadimplência")}><span>Se também recuperar os ${currency.format(yearEndPlan.uncertainDelinquency)}</span><strong>${currency.format(plan.potentialDeficit)}</strong><small>Cenário potencial, não garantido</small></div>
+        </div>
+      </article>
+    </section>`;
+}
+
+function buildLegacyPresentationPages() {
   const summary = summarize(state.records);
   const ministry = summarizeMinistry(state.ministryRecords);
   const timeline = buildCreditTimeline(state.records);
@@ -642,7 +1054,33 @@ function buildPresentationPages() {
   const overdueInstallments = defaulters.reduce((total, person) => total + person.installments, 0);
   const toReconcile = timeline.reduce((total, item) => total + item.toReconcile, 0);
   const futureForecast = timeline.reduce((total, item) => total + item.forecast, 0);
-  const comparisonDifference = summary.credited - ministry.classes;
+  const ministryBalance = ministry.entries - ministry.exits;
+  const ministryCourseExits = state.ministryRecords.filter((record) => record.financeKind === "aulas" && record.type.toLocaleLowerCase("pt-BR") === "saida");
+  const directInterpretation = state.ministryRecords.filter((record) => isInterpretationExpense(record) && !isMixedInterpretationExpense(record));
+  const mixedInterpretation = state.ministryRecords.filter(isMixedInterpretationExpense);
+  const directInterpretationTotal = directInterpretation.reduce((total, record) => total + record.amount, 0);
+  const mixedInterpretationTotal = mixedInterpretation.reduce((total, record) => total + record.amount, 0);
+  const expenseGroups = groupMinistryExpenses(state.ministryRecords);
+  const interpretationItems = directInterpretation.map((record) => {
+    const reason = record.specification || record.description || record.eventTitle || "Interpretação registrada";
+    return `<li>
+      <time>${safe(formatIsoDate(record.date))}</time>
+      <span><strong>${safe(record.name || record.category)}</strong><small>${safe(reason)}</small></span>
+      <b>${currency.format(record.amount)}</b>
+    </li>`;
+  }).join("");
+  const expenseGroupRows = expenseGroups.map((group) => {
+    const reasons = [...group.reasons];
+    const visibleReasons = reasons.slice(0, 3).join(" · ");
+    const remaining = reasons.length - 3;
+    return `<tr>
+      <td><span class="presentation-expense-kind">${safe(group.kind)}</span></td>
+      <td><strong>${safe(group.category)}</strong></td>
+      <td class="presentation-expense-reason">${safe(visibleReasons)}${remaining > 0 ? ` <b>+ ${remaining} outros motivos</b>` : ""}</td>
+      <td>${number.format(group.records.length)}</td>
+      <td>${currency.format(group.total)}</td>
+    </tr>`;
+  }).join("");
 
   const pages = [
     {
@@ -663,10 +1101,10 @@ function buildPresentationPages() {
           </article>
           <article class="audit-clickable" ${auditAttributes("ministry-all", "lançamentos administrativos")}>
             <span class="presentation-source-icon presentation-source-expense">${icons.money}</span>
-            <p class="presentation-source-label">Despesas administrativas</p>
-            <h4>finançassinaisdoreino.csv</h4>
+            <p class="presentation-source-label">Finanças administrativas</p>
+            <h4>finançassinaisdoreino.json</h4>
             <strong>${number.format(ministry.count)} lançamentos</strong>
-            <p>Origina as saídas dos núcleos “aulas” e “geral”, com data, categoria e responsável.</p>
+            <p>Reúne as saídas do JSON e as entradas administrativas recorrentes cadastradas no sistema.</p>
           </article>
         </div>
         <div class="presentation-source-note">${icons.check}<p><strong>Regra da auditoria:</strong> cada número apresentado informa sua coluna, fórmula e base de origem.</p></div>`,
@@ -674,7 +1112,7 @@ function buildPresentationPages() {
     {
       theme: "income",
       kicker: "Página 2 · Recebimentos",
-      title: "Quanto realmente entrou na conta?",
+      title: "Quanto realmente entrou na conta Curso de libras",
       content: `
         <div class="presentation-main-metric presentation-main-income audit-clickable" ${auditAttributes("course-credited", "recebido líquido pelo Ministério")}>
           <span>Recebido líquido pelo Ministério</span>
@@ -682,16 +1120,28 @@ function buildPresentationPages() {
           <p>Fonte: <b>Libras.xlsx</b> · soma da coluna <b>Valor Creditado</b>.</p>
         </div>
         <div class="presentation-metric-grid">
-          <article class="audit-clickable" ${auditAttributes("course-paid", "pago pelos alunos")}><span>Pago pelos alunos</span><strong>${currency.format(summary.paid)}</strong><p>Coluna Valor Pago. É informativo e não significa dinheiro em conta.</p></article>
-          <article class="audit-clickable" ${auditAttributes("course-fees", "tarifas e taxas")}><span>Tarifas e taxas</span><strong>${currency.format(summary.fees)}</strong><p>Valor absoluto da coluna Despesa Financeira.</p></article>
+          <article class="audit-clickable" ${auditAttributes("course-paid", "pago pelos alunos")}><span>Pago pelos alunos</span><strong>${currency.format(summary.paid)}</strong><p>Coluna Valor Pago. É informativo e está sem os descontos da operadora de cartão.</p></article>
+          <article class="audit-clickable" ${auditAttributes("course-fees", "tarifas e taxas")}><span>Tarifas e taxas</span><strong>${currency.format(summary.fees)}</strong><p>Valor das tarifas e taxas cobradas pela operadora de cartão.</p></article>
           <article class="audit-clickable" ${auditAttributes("course-awaiting", "pago sem crédito registrado")}><span>Pago sem crédito registrado</span><strong>${currency.format(summary.awaitingCredit)}</strong><p>Pagamentos feitos no cartão que serão creditados posteriormente pela operadora na conta do Ministério.</p></article>
         </div>
-        <div class="presentation-formula"><span>Conferência dos dados atuais</span><strong>${currency.format(summary.paid)} − ${currency.format(summary.fees)} − ${currency.format(summary.awaitingCredit)} = ${currency.format(summary.credited)}</strong></div>`,
+        <div class="presentation-formula presentation-formula-featured">
+          <span>Conferência dos dados atuais</span>
+          <div class="presentation-formula-equation">
+            <div><small>Pago pelos alunos</small><strong>${currency.format(summary.paid)}</strong></div>
+            <b aria-hidden="true">−</b>
+            <div><small>Tarifas da operadora</small><strong>${currency.format(summary.fees)}</strong></div>
+            <b aria-hidden="true">−</b>
+            <div><small>Ainda sem crédito</small><strong>${currency.format(summary.awaitingCredit)}</strong></div>
+            <b aria-hidden="true">=</b>
+            <div class="presentation-formula-result"><small>Líquido recebido</small><strong>${currency.format(summary.credited)}</strong></div>
+          </div>
+          <p>O valor líquido é o total pago, descontando as taxas do cartão e as parcelas que a operadora ainda não creditou.</p>
+        </div>`,
     },
     {
       theme: "credit",
       kicker: "Página 3 · Competência",
-      title: "Quando o dinheiro entrou — ou deveria entrar?",
+      title: "Quando o dinheiro deveria entrar?",
       content: `
         <div class="presentation-metric-grid presentation-metric-grid-three">
           <article class="audit-clickable" ${auditAttributes("course-awaiting", "pago aguardando crédito")}><span>Pago, aguardando crédito</span><strong>${currency.format(summary.awaitingCredit)}</strong><p>Pagamentos no cartão que a operadora creditará posteriormente.</p></article>
@@ -728,38 +1178,72 @@ function buildPresentationPages() {
     {
       theme: "expenses",
       kicker: "Página 5 · Despesas",
-      title: "O que saiu nas finanças do Ministério?",
+      title: "Entradas, saídas e para onde foi o dinheiro",
       content: `
-        <div class="presentation-main-metric presentation-main-danger audit-clickable" ${auditAttributes("ministry-exits", "total de saídas registradas")}>
-          <span>Total de saídas registradas</span>
-          <strong>${currency.format(ministry.exits)}</strong>
-          <p>Fonte: finançassinaisdoreino.csv · soma de amount onde type = “saida”.</p>
+        <div class="presentation-scope-grid">
+          <article class="presentation-scope-card presentation-scope-income audit-clickable" ${auditAttributes("course-credited", "entrada geral realizada do curso")}>
+            <span>Entrada geral do curso</span><strong>${currency.format(summary.credited)}</strong>
+            <p>Valor líquido realmente creditado na conta.</p><small>Fonte: Valor Creditado · ${safe(state.sourceName)}</small>
+          </article>
+          <article class="presentation-scope-card presentation-scope-expense audit-clickable" ${auditAttributes("ministry-classes", "saída geral realizada do curso")}>
+            <span>Saída geral do curso</span><strong>${currency.format(ministry.classes)}</strong>
+            <p>Quanto foi gasto diretamente com o núcleo de aulas.</p><small>${number.format(ministryCourseExits.length)} saídas · finançassinaisdoreino.json</small>
+          </article>
+          <article class="presentation-scope-card presentation-scope-income audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas do Ministério")}>
+            <span>Entradas administrativas</span><strong>${currency.format(ministry.entries)}</strong>
+            <p>R$ 500 para Alex + R$ 1.000 do Ministério por mês.</p><small>R$ 1.500/mês · janeiro a setembro de 2026</small>
+          </article>
+          <article class="presentation-scope-card presentation-scope-expense audit-clickable" ${auditAttributes("ministry-exits", "saída geral registrada do Ministério")}>
+            <span>Saída geral do Ministério</span><strong>${currency.format(ministry.exits)}</strong>
+            <p>Todas as saídas registradas: aulas e despesas gerais.</p><small>O gasto do curso já está incluído neste total</small>
+          </article>
         </div>
-        <div class="presentation-metric-grid">
-          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas do núcleo de aulas")}><span>Núcleo de aulas</span><strong>${currency.format(ministry.classes)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "aulas" && record.type.toLocaleLowerCase("pt-BR") === "saida").length} saídas com finance_kind = aulas.</p></article>
-          <article class="audit-clickable" ${auditAttributes("ministry-general", "despesas gerais")}><span>Despesas gerais</span><strong>${currency.format(ministry.general)}</strong><p>${state.ministryRecords.filter((record) => record.financeKind === "geral" && record.type.toLocaleLowerCase("pt-BR") === "saida").length} saídas com finance_kind = geral.</p></article>
-          <article class="audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas")}><span>Entradas administrativas</span><strong>${currency.format(ministry.entries)}</strong><p>A base atual não possui registros com type = entrada.</p></article>
+
+        <div class="presentation-scope-note">
+          <span>${icons.check}</span>
+          <p><strong>Como ler:</strong> não some as duas saídas. Os ${currency.format(ministry.classes)} gastos com o curso já fazem parte dos ${currency.format(ministry.exits)} de saída geral do Ministério.</p>
         </div>
-        <div class="presentation-source-note presentation-source-warning">${icons.clock}<p><strong>Importante:</strong> essa base registra despesas administrativas e permanece separada das mensalidades do curso.</p></div>`,
+
+        <div class="presentation-expense-focus">
+          <section class="presentation-detail-panel presentation-interpretation-panel">
+            <div class="presentation-detail-head">
+              <div><span>Campo específico</span><h4>Interpretação de culto</h4><p>Pagamentos identificados diretamente como interpretação ou intérprete.</p></div>
+              <button class="presentation-interpretation-total audit-clickable" ${auditAttributes("ministry-interpretation", "pagamentos diretos de interpretação")} type="button"><span>Total direto</span><strong>${currency.format(directInterpretationTotal)}</strong><small>${number.format(directInterpretation.length)} pagamentos</small></button>
+            </div>
+            <ul class="presentation-interpretation-list">${interpretationItems || `<li class="presentation-empty-detail">Nenhum pagamento direto de interpretação foi identificado.</li>`}</ul>
+            ${mixedInterpretation.length ? `<button class="presentation-mixed-expense audit-clickable" ${auditAttributes("ministry-interpretation-mixed", "lançamento misto que inclui interpretação")} type="button"><span>${icons.clock}</span><p><strong>${currency.format(mixedInterpretationTotal)} em lançamento misto</strong> “Alimentação, oferta e intérprete” não separa a parte da interpretação; por isso, não entra no total direto acima.</p></button>` : ""}
+          </section>
+
+          <section class="presentation-detail-panel presentation-spending-panel">
+            <div class="presentation-detail-head">
+              <div><span>Detalhamento realizado</span><h4>Quanto foi gasto e por quê</h4><p>Cada saída agrupada por núcleo e categoria, com os motivos registrados.</p></div>
+              <strong class="presentation-spending-total">${currency.format(ministry.exits)}</strong>
+            </div>
+            <div class="presentation-spending-table-wrap">
+              <table class="presentation-spending-table"><thead><tr><th>Núcleo</th><th>Categoria</th><th>Por que foi gasto</th><th>Qtd.</th><th>Total</th></tr></thead><tbody>${expenseGroupRows}</tbody></table>
+            </div>
+            <p class="presentation-spending-help">Clique em “Saída geral do Ministério” para abrir a auditoria completa de cada lançamento.</p>
+          </section>
+        </div>`,
     },
     {
       theme: "flow",
       kicker: "Página 6 · Fluxo mensal",
-      title: "Receita do curso x despesas das aulas",
+      title: "Entradas administrativas x saídas gerais",
       content: `
         <div class="presentation-chart-card">
           <div class="presentation-chart-head">
-            <div class="legend"><span><i style="background:#006cfc"></i>Receita líquida do curso</span><span><i style="background:#b85543"></i>Despesas das aulas</span></div>
-            <div class="presentation-excluded-expense audit-clickable" ${auditAttributes("ministry-general", "despesas de outras áreas")}>
-              <span>Fora desta comparação</span><strong>${currency.format(ministry.general)}</strong><small>Outras áreas do Ministério</small>
+            <div><div class="legend"><span><i style="background:#438b77"></i>Entradas administrativas</span><span><i style="background:#b85543"></i>Saídas gerais do Ministério</span></div><p class="presentation-chart-explanation">Comparação mensal de todas as entradas e saídas administrativas registradas.</p></div>
+            <div class="presentation-excluded-expense audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas")}>
+              <span>Entrada recorrente mensal</span><strong>${currency.format(1500)}</strong><small>R$ 500 para Alex + R$ 1.000 do Ministério</small>
             </div>
           </div>
-          ${cashFlowComparisonChart(state.records, state.ministryRecords)}
+          ${consolidatedFlowComparisonChart(state.records, state.ministryRecords)}
         </div>
         <div class="presentation-metric-grid presentation-flow-summary">
-          <article class="audit-clickable" ${auditAttributes("course-credited", "receita líquida do curso")}><span>Receita líquida do curso</span><strong>${currency.format(summary.credited)}</strong><p>Somente o Valor Creditado que entrou na conta.</p></article>
-          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas das aulas")}><span>Despesas das aulas</span><strong>${currency.format(ministry.classes)}</strong><p>Somente saídas do núcleo “aulas”.</p></article>
-          <article class="audit-clickable ${comparisonDifference < 0 ? "presentation-alert-metric" : ""}" ${auditAttributes("comparison-difference", "resultado direto do curso")}><span>Resultado direto do curso</span><strong>${currency.format(comparisonDifference)}</strong><p>Receita líquida menos despesas diretamente ligadas às aulas.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas")}><span>Entradas administrativas</span><strong>${currency.format(ministry.entries)}</strong><p>R$ 1.500 por mês, de janeiro a setembro.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-exits", "saídas gerais do Ministério")}><span>Saídas gerais do Ministério</span><strong>${currency.format(ministry.exits)}</strong><p>Inclui ${currency.format(ministry.classes)} das aulas e ${currency.format(ministry.general)} das demais áreas.</p></article>
+          <article class="${ministryBalance < 0 ? "presentation-alert-metric" : ""}"><span>Resultado administrativo</span><strong>${currency.format(ministryBalance)}</strong><p>Entradas administrativas menos todas as saídas do Ministério.</p></article>
         </div>`,
     },
     {
@@ -771,7 +1255,7 @@ function buildPresentationPages() {
           <article><span>01</span><div><strong>Dinheiro recebido</strong><p>Somente Valor Creditado representa entrada real do curso.</p></div></article>
           <article><span>02</span><div><strong>Pagamento do aluno</strong><p>Valor Pago mostra o que saiu da conta do aluno; pode ainda estar aguardando crédito.</p></div></article>
           <article><span>03</span><div><strong>Inadimplência</strong><p>É saldo vencido não pago pelo aluno. Não é a mesma coisa que crédito vencido.</p></div></article>
-          <article><span>04</span><div><strong>Despesas do Ministério</strong><p>Vêm exclusivamente do finançassinaisdoreino.csv e são comparadas por data.</p></div></article>
+          <article><span>04</span><div><strong>Finanças do Ministério</strong><p>As despesas vêm do JSON; as entradas administrativas recorrentes cadastradas no sistema aparecem separadamente.</p></div></article>
         </div>
         <div class="presentation-audit-footnote">
           <strong>Ajustes aplicados à base</strong>
@@ -780,10 +1264,163 @@ function buildPresentationPages() {
     },
   ];
 
-  return [pages.at(-1), ...pages.slice(1, -1)].map((page, index) => ({
+  return [pages.at(-1), pages[1], pages[3], pages[4], pages[5]].map((page, index) => ({
     ...page,
     kicker: page.kicker.replace(/Página \d+/, `Página ${index + 1}`),
   }));
+}
+
+function buildPresentationPages() {
+  const summary = summarize(state.records);
+  const ministry = summarizeMinistry(state.ministryRecords);
+  const timeline = buildCreditTimeline(state.records);
+  const defaulters = buildDefaulters(state.records);
+  const overdueInstallments = defaulters.reduce((total, person) => total + person.installments, 0);
+  const toReconcile = timeline.reduce((total, item) => total + item.toReconcile, 0);
+  const futureForecast = timeline.reduce((total, item) => total + item.forecast, 0);
+  const registeredInflows = summary.credited + ministry.entries;
+  const registeredNet = registeredInflows - ministry.exits;
+  const directInterpretation = state.ministryRecords.filter((record) => isInterpretationExpense(record) && !isMixedInterpretationExpense(record));
+  const mixedInterpretation = state.ministryRecords.filter(isMixedInterpretationExpense);
+  const directInterpretationTotal = directInterpretation.reduce((total, record) => total + record.amount, 0);
+  const mixedInterpretationTotal = mixedInterpretation.reduce((total, record) => total + record.amount, 0);
+  const expenseRecords = state.ministryRecords.filter((record) => record.type.toLocaleLowerCase("pt-BR") === "saida");
+  const missingStructuredReason = expenseRecords.filter((record) => !record.specification && !record.description).length;
+  const registeredEntryCount = state.ministryRecords.filter((record) => record.type.toLocaleLowerCase("pt-BR") === "entrada" && record.createdBy === "Cadastro solicitado").length;
+  const expenseGroups = groupMinistryExpenses(state.ministryRecords);
+  const leadingExpenseGroups = expenseGroups.slice(0, 6);
+  const remainingExpenseTotal = expenseGroups.slice(6).reduce((total, group) => total + group.total, 0);
+  const expenseRanking = remainingExpenseTotal > 0
+    ? [...leadingExpenseGroups, { kind: "geral", category: "Demais categorias", total: remainingExpenseTotal, records: expenseGroups.slice(6).flatMap((group) => group.records) }]
+    : leadingExpenseGroups;
+  const expenseRankingMax = Math.max(...expenseRanking.map((group) => group.total), 1);
+  const interpretationItems = directInterpretation.map((record) => {
+    const reason = record.specification || record.description || record.eventTitle || "Interpretação registrada";
+    return `<li><time>${safe(formatIsoDate(record.date))}</time><span><strong>${safe(record.name || record.category)}</strong><small>${safe(reason)}</small></span><b>${currency.format(record.amount)}</b></li>`;
+  }).join("");
+  const pendingMonths = timeline.filter((item) => item.toReconcile > 0 || item.forecast > 0);
+
+  return [
+    {
+      theme: "method",
+      kicker: "Página 1 · Resumo executivo",
+      title: "O que os registros financeiros mostram",
+      content: `
+        <div class="presentation-audit-status-row" aria-label="Estados usados na auditoria">
+          <span class="presentation-audit-status status-confirmed">Confirmado no sistema</span>
+          <span class="presentation-audit-status status-registered">Cadastrado · comprovante pendente</span>
+          <span class="presentation-audit-status status-recorded">Saída registrada</span>
+          <span class="presentation-audit-status status-unreconciled">Não conciliado com extrato</span>
+        </div>
+        <div class="presentation-executive-grid">
+          <article class="presentation-executive-card audit-clickable" ${auditAttributes("course-credited", "crédito líquido do curso")}><span>Curso · líquido creditado</span><strong>${currency.format(summary.credited)}</strong><p>Soma da coluna Valor Creditado.</p><small class="presentation-audit-status status-confirmed">Confirmado no sistema do curso</small></article>
+          <article class="presentation-executive-card audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas cadastradas")}><span>Entradas administrativas</span><strong>${currency.format(ministry.entries)}</strong><p>R$ 1.500 por mês, de janeiro a setembro.</p><small class="presentation-audit-status status-registered">${number.format(registeredEntryCount)} registros retroativos</small></article>
+          <article class="presentation-executive-card presentation-executive-expense audit-clickable" ${auditAttributes("ministry-exits", "todas as saídas do Ministério")}><span>Todas as saídas</span><strong>${currency.format(ministry.exits)}</strong><p>Aulas e demais despesas do Ministério.</p><small class="presentation-audit-status status-recorded">${number.format(expenseRecords.length)} pagamentos registrados</small></article>
+          <article class="presentation-executive-card ${registeredNet < 0 ? "presentation-executive-expense" : "presentation-executive-result"} audit-clickable" ${auditAttributes("registered-net", "resultado registrado no período")}><span>Resultado registrado</span><strong>${currency.format(registeredNet)}</strong><p>Entradas registradas menos todas as saídas.</p><small class="presentation-audit-status status-unreconciled">Não representa saldo bancário</small></article>
+        </div>
+        <div class="presentation-formula presentation-formula-featured presentation-executive-formula">
+          <span>Conta do resultado registrado</span>
+          <div class="presentation-formula-equation">
+            <div><small>Crédito do curso</small><strong>${currency.format(summary.credited)}</strong></div><b aria-hidden="true">+</b>
+            <div><small>Entradas administrativas</small><strong>${currency.format(ministry.entries)}</strong></div><b aria-hidden="true">−</b>
+            <div><small>Todas as saídas</small><strong>${currency.format(ministry.exits)}</strong></div><b aria-hidden="true">=</b>
+            <div class="presentation-formula-result"><small>Resultado registrado</small><strong>${currency.format(registeredNet)}</strong></div>
+          </div>
+        </div>
+        <div class="presentation-audit-caveat">${icons.clock}<p><strong>Limite da auditoria:</strong> este resultado só poderá ser chamado de saldo real depois da conferência com extrato, saldo inicial e comprovantes. As entradas administrativas usam datas mensais cadastradas, não datas bancárias comprovadas.</p></div>`,
+    },
+    {
+      theme: "income",
+      kicker: "Página 2 · Receita do curso",
+      title: "Como chegamos ao dinheiro líquido do curso",
+      content: `
+        <div class="presentation-main-metric presentation-main-income audit-clickable" ${auditAttributes("course-credited", "recebido líquido pelo Ministério")}>
+          <span>Valor líquido creditado</span><strong>${currency.format(summary.credited)}</strong>
+          <p>Dinheiro registrado na coluna <b>Valor Creditado</b> da planilha do curso.</p>
+          <small class="presentation-audit-status status-confirmed">Fórmula conferida linha a linha</small>
+        </div>
+        <div class="presentation-metric-grid">
+          <article class="audit-clickable" ${auditAttributes("course-paid", "pago pelos alunos")}><span>Pago pelos alunos</span><strong>${currency.format(summary.paid)}</strong><p>Valor bruto, antes dos descontos da operadora.</p></article>
+          <article class="audit-clickable" ${auditAttributes("course-fees", "tarifas da operadora")}><span>Tarifas da operadora</span><strong>${currency.format(summary.fees)}</strong><p>Taxas cobradas no processamento do cartão.</p></article>
+          <article class="audit-clickable" ${auditAttributes("course-awaiting", "pago ainda não creditado")}><span>Pago, ainda sem crédito</span><strong>${currency.format(summary.awaitingCredit)}</strong><p>Valor pago no cartão que ainda não entrou.</p></article>
+        </div>
+        <div class="presentation-formula presentation-formula-featured">
+          <span>Reconciliação do curso</span>
+          <div class="presentation-formula-equation">
+            <div><small>Pago pelos alunos</small><strong>${currency.format(summary.paid)}</strong></div><b aria-hidden="true">−</b>
+            <div><small>Tarifas</small><strong>${currency.format(summary.fees)}</strong></div><b aria-hidden="true">−</b>
+            <div><small>Ainda sem crédito</small><strong>${currency.format(summary.awaitingCredit)}</strong></div><b aria-hidden="true">=</b>
+            <div class="presentation-formula-result"><small>Líquido creditado</small><strong>${currency.format(summary.credited)}</strong></div>
+          </div>
+          <p>Não foram encontrados créditos sem pagamento, créditos sem data ou diferenças entre Valor Pago − Taxa e Valor Creditado.</p>
+        </div>`,
+    },
+    {
+      theme: "delinquency",
+      kicker: "Página 3 · Pendências",
+      title: "O que ainda não entrou — e por qual motivo",
+      content: `
+        <div class="presentation-pending-grid">
+          <article class="presentation-pending-card presentation-pending-operator audit-clickable" ${auditAttributes("course-awaiting", "pagamentos aguardando a operadora")}>
+            <span class="presentation-audit-status status-pending">Pendente da operadora</span><h4>Aluno pagou, Ministério aguarda</h4><strong>${currency.format(summary.awaitingCredit)}</strong>
+            <p>Não é inadimplência: o pagamento já ocorreu no cartão.</p>
+            <div><span><b>${currency.format(toReconcile)}</b><small>previsão já vencida</small></span><span><b>${currency.format(futureForecast)}</b><small>previsão setembro e outubro</small></span></div>
+          </article>
+          <article class="presentation-pending-card presentation-pending-student audit-clickable" ${auditAttributes("course-overdue", "inadimplência vencida dos alunos")}>
+            <span class="presentation-audit-status status-overdue">Cobrança necessária</span><h4>Aluno ainda não pagou</h4><strong>${currency.format(summary.overdue)}</strong>
+            <p>${number.format(defaulters.length)} pessoas · ${number.format(overdueInstallments)} parcelas vencidas.</p>
+            <div><span><b>${currency.format(summary.open)}</b><small>total em aberto</small></span><span><b>${currency.format(summary.futureDue)}</b><small>parcelas futuras</small></span></div>
+          </article>
+        </div>
+        <div class="presentation-pending-details">
+          <section><div class="presentation-detail-head"><div><span>Repasse do cartão</span><h4>Quando deveria cair</h4></div></div><div class="presentation-pending-months">${pendingMonths.map((item) => `<div><span>${safe(item.name)}</span><strong>${currency.format(item.toReconcile + item.forecast)}</strong><small>${item.toReconcile > 0 ? "Vencido, precisa conciliar" : "Previsão informada"}</small></div>`).join("")}</div></section>
+          <section><div class="presentation-detail-head"><div><span>Cobrança por pessoa</span><h4>Quem ainda deve</h4></div></div><div class="presentation-pending-people">${defaulters.map((person) => `<button class="audit-clickable" ${auditAttributes(`defaulter:${encodeURIComponent(person.name)}`, `inadimplência de ${person.name}`)} type="button"><span>${safe(person.name)}</span><strong>${currency.format(person.amount)}</strong><small>${number.format(person.installments)} ${person.installments === 1 ? "parcela" : "parcelas"}</small></button>`).join("")}</div></section>
+        </div>
+        <div class="presentation-data-source">Não some os dois valores como dinheiro a receber da mesma origem: um depende do repasse da operadora; o outro depende do pagamento do aluno.</div>`,
+    },
+    {
+      theme: "expenses",
+      kicker: "Página 4 · Despesas",
+      title: "Quanto foi gasto e para onde o dinheiro foi",
+      content: `
+        <div class="presentation-metric-grid">
+          <article class="audit-clickable" ${auditAttributes("ministry-exits", "total de saídas")}><span>Todas as saídas</span><strong>${currency.format(ministry.exits)}</strong><p>${number.format(expenseRecords.length)} pagamentos registrados.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-classes", "despesas das aulas")}><span>Aulas</span><strong>${currency.format(ministry.classes)}</strong><p>Professores e despesas diretamente classificadas no núcleo aulas.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-general", "demais despesas do Ministério")}><span>Demais despesas</span><strong>${currency.format(ministry.general)}</strong><p>Alimentação, transporte, interpretação e outras áreas.</p></article>
+        </div>
+        <div class="presentation-expense-audit-grid">
+          <section class="presentation-detail-panel">
+            <div class="presentation-detail-head"><div><span>Concentração dos gastos</span><h4>Maiores categorias</h4><p>Valores agrupados pela classificação registrada.</p></div></div>
+            <div class="presentation-expense-ranking">${expenseRanking.map((group) => `<div><span><strong>${safe(group.category)}</strong><small>${safe(group.kind)} · ${number.format(group.records.length)} ${group.records.length === 1 ? "lançamento" : "lançamentos"}</small></span><i><b style="width:${(group.total / expenseRankingMax) * 100}%"></b></i><em>${currency.format(group.total)}</em></div>`).join("")}</div>
+          </section>
+          <section class="presentation-detail-panel presentation-interpretation-panel">
+            <div class="presentation-detail-head"><div><span>Campo específico</span><h4>Interpretação de culto</h4><p>Pagamentos identificados diretamente como interpretação.</p></div><button class="presentation-interpretation-total audit-clickable" ${auditAttributes("ministry-interpretation", "pagamentos diretos de interpretação")} type="button"><span>Total direto</span><strong>${currency.format(directInterpretationTotal)}</strong><small>${number.format(directInterpretation.length)} pagamentos</small></button></div>
+            <ul class="presentation-interpretation-list">${interpretationItems}</ul>
+            ${mixedInterpretation.length ? `<button class="presentation-mixed-expense audit-clickable" ${auditAttributes("ministry-interpretation-mixed", "lançamento misto com interpretação")} type="button"><span>${icons.clock}</span><p><strong>${currency.format(mixedInterpretationTotal)} em lançamento misto.</strong> Alimentação, oferta e intérprete não foram separados; esse valor não entra no total direto.</p></button>` : ""}
+          </section>
+        </div>
+        <div class="presentation-audit-caveat presentation-audit-warning">${icons.clock}<p><strong>Qualidade da documentação:</strong> ${number.format(missingStructuredReason)} das ${number.format(expenseRecords.length)} saídas não possuem especificação ou descrição estruturada. O nome ajuda a identificar o gasto, mas ainda faltam comprovante, conta de origem e situação da conciliação.</p></div>`,
+    },
+    {
+      theme: "flow",
+      kicker: "Página 5 · Fluxo consolidado",
+      title: "Tudo que entrou x tudo que saiu por mês",
+      content: `
+        <div class="presentation-chart-card presentation-consolidated-chart-card">
+          <div class="presentation-chart-head">
+            <div><div class="legend"><span><i style="background:#55a9ff"></i>Entradas administrativas</span><span><i style="background:#438b77"></i>Crédito do curso</span><span><i style="background:#b85543"></i>Todas as saídas</span></div><p class="presentation-chart-explanation">A barra de entrada é composta pelas duas origens. A linha abaixo mostra o resultado registrado de cada mês.</p></div>
+            <div class="presentation-excluded-expense audit-clickable" ${auditAttributes("combined-entries", "todas as entradas registradas")}><span>Total que entrou</span><strong>${currency.format(registeredInflows)}</strong><small>Curso + entradas administrativas</small></div>
+          </div>
+          ${consolidatedFlowComparisonChart(state.records, state.ministryRecords)}
+        </div>
+        <div class="presentation-metric-grid presentation-flow-summary">
+          <article class="audit-clickable" ${auditAttributes("combined-entries", "todas as entradas registradas")}><span>Entradas registradas</span><strong>${currency.format(registeredInflows)}</strong><p>${currency.format(summary.credited)} do curso + ${currency.format(ministry.entries)} administrativas.</p></article>
+          <article class="audit-clickable" ${auditAttributes("ministry-exits", "todas as saídas do Ministério")}><span>Todas as saídas</span><strong>${currency.format(ministry.exits)}</strong><p>${currency.format(ministry.classes)} das aulas + ${currency.format(ministry.general)} das demais áreas.</p></article>
+          <article class="${registeredNet < 0 ? "presentation-alert-metric" : ""} audit-clickable" ${auditAttributes("registered-net", "resultado registrado no período")}><span>Resultado registrado</span><strong>${currency.format(registeredNet)}</strong><p>Fluxo do período; não é saldo bancário conciliado.</p></article>
+        </div>
+        <div class="presentation-audit-caveat">${icons.check}<p><strong>Leitura correta:</strong> o resultado de ${currency.format(registeredNet)} só é válido para os lançamentos presentes nas bases. Saldo inicial, transferências internas e movimentos ausentes podem alterar o saldo real da conta.</p></div>`,
+    },
+  ];
 }
 
 function renderPresentation() {
@@ -844,12 +1481,109 @@ function renderPresentation() {
   });
 }
 
+function renderMinistryAuditContent(ministrySummary) {
+  const directInterpretation = state.ministryRecords.filter((record) => isInterpretationExpense(record) && !isMixedInterpretationExpense(record));
+  const mixedInterpretation = state.ministryRecords.filter(isMixedInterpretationExpense);
+  const directTotal = directInterpretation.reduce((total, record) => total + record.amount, 0);
+  const mixedTotal = mixedInterpretation.reduce((total, record) => total + record.amount, 0);
+  const undocumented = state.ministryRecords.filter((record) =>
+    record.type.toLocaleLowerCase("pt-BR") === "saida" && !record.specification && !record.description,
+  );
+  const interpretationRows = directInterpretation.map((record) => `<tr>
+    <td>${safe(formatIsoDate(record.date))}</td>
+    <td><strong>${safe(record.name || record.category)}</strong></td>
+    <td>${safe(record.specification || record.description || record.eventTitle || "Interpretação registrada")}</td>
+    <td>${safe(record.paymentMethod)}</td>
+    <td class="money money-pending">${currency.format(record.amount)}</td>
+  </tr>`).join("");
+
+  return `<div class="ministry-audit-content">
+    <article class="card operational-panel">
+      <div class="operational-panel-head">
+        <div><p class="eyebrow">Destino das saídas</p><h3 class="panel-title">Onde o Ministério gastou</h3><p class="panel-subtitle">Categorias ordenadas pelo total. Clique em uma barra para conferir os lançamentos que formam o valor.</p></div>
+        <div class="audit-inline-definition"><strong>${currency.format(ministrySummary.exits)}</strong><span>${number.format(state.ministryRecords.filter((record) => record.type.toLocaleLowerCase("pt-BR") === "saida").length)} saídas registradas</span></div>
+      </div>
+      <div class="operational-legend"><span><i class="legend-classes"></i>Núcleo de aulas</span><span><i class="legend-general"></i>Outras áreas</span></div>
+      ${expenseCategoryAuditChart(state.ministryRecords)}
+      <p class="graph-reading"><strong>Como ler:</strong> o comprimento compara as categorias; o percentual mostra quanto cada uma representa nas saídas. O valor de aulas já faz parte do total geral e não deve ser somado novamente.</p>
+    </article>
+
+    <article class="card operational-panel interpretation-audit-panel">
+      <div class="operational-panel-head">
+        <div><p class="eyebrow">Controle específico</p><h3 class="panel-title">Interpretação de culto</h3><p class="panel-subtitle">Somente pagamentos identificados diretamente como interpretação ou intérprete.</p></div>
+        <button class="audit-inline-definition audit-clickable" ${auditAttributes("ministry-interpretation", "pagamentos diretos de interpretação")} type="button"><strong>${currency.format(directTotal)}</strong><span>${number.format(directInterpretation.length)} pagamentos identificados</span></button>
+      </div>
+      <div class="table-wrap planning-table-wrap"><table class="planning-detail-table"><thead><tr><th>Data</th><th>Intérprete / destino</th><th>Motivo registrado</th><th>Meio</th><th>Valor</th></tr></thead><tbody>${interpretationRows || `<tr><td colspan="5" class="empty-state">Nenhum pagamento direto identificado.</td></tr>`}</tbody></table></div>
+      ${mixedInterpretation.length ? `<button class="ministry-mixed-warning audit-clickable" ${auditAttributes("ministry-interpretation-mixed", "lançamento misto com interpretação")} type="button"><span>${icons.clock}</span><div><strong>${currency.format(mixedTotal)} em lançamento misto</strong><p>O texto reúne alimentação, oferta e intérprete; como não há divisão, esse total não foi tratado como pagamento exclusivo de interpretação.</p></div></button>` : ""}
+    </article>
+
+    <div class="audit-documentation-note ${undocumented.length ? "has-warning" : ""}">
+      <span>${icons.rows}</span><div><strong>Qualidade da documentação</strong><p>${number.format(undocumented.length)} de ${number.format(state.ministryRecords.filter((record) => record.type.toLocaleLowerCase("pt-BR") === "saida").length)} saídas não têm especificação ou descrição estruturada. O nome do destino continua disponível, mas comprovante, conta bancária e conciliação não fazem parte desta base.</p></div>
+    </div>
+  </div>`;
+}
+
+function renderOperationalCashflow(summary, ministrySummary) {
+  const plan = planningTotals();
+  const registeredEntries = summary.credited + ministrySummary.entries;
+  const registeredNet = registeredEntries - ministrySummary.exits;
+  return `<section class="flow-section app-view operational-flow" id="cashflow" data-view="cashflow">
+    <div class="flow-heading operational-page-heading">
+      <div><p class="eyebrow">Análise mensal auditável</p><h2 class="section-title">Fluxo e projeções</h2><p class="section-copy">Cada gráfico responde uma pergunta diferente. Realizado, registrado e projetado permanecem visualmente separados.</p></div>
+      <span class="participant-total-badge">5 leituras</span>
+    </div>
+
+    <div class="operational-flow-stack">
+      <article class="card operational-panel operational-chart-primary">
+        <div class="operational-panel-head"><div><span class="chart-number">01</span><h3 class="panel-title">Quanto entrou e quanto saiu em cada mês?</h3><p class="panel-subtitle">Entradas = Valor Creditado do curso + entradas administrativas. Saídas = todos os lançamentos de saída do Ministério.</p></div><div class="audit-inline-definition"><strong>${currency.format(registeredNet)}</strong><span>resultado registrado no período</span></div></div>
+        <div class="operational-legend"><span><i class="legend-income"></i>Entradas totais</span><span><i class="legend-expense"></i>Saídas totais</span><span><b>±</b>Resultado do mês</span></div>
+        ${operationalConsolidatedFlowChart(state.records, state.ministryRecords)}
+        <p class="graph-reading"><strong>Por que importa:</strong> identifica os meses em que as saídas foram maiores que as entradas. Este resultado não inclui ${currency.format(summary.awaitingCredit)} aguardando a operadora nem ${currency.format(summary.overdue)} de inadimplência. Clique em um mês para conferir a composição.</p>
+      </article>
+
+      <article class="card operational-panel">
+        <div class="operational-panel-head"><div><span class="chart-number">02</span><h3 class="panel-title">O curso pagou as próprias aulas?</h3><p class="panel-subtitle">Compara exclusivamente o crédito líquido do curso com as despesas classificadas no núcleo “aulas”.</p></div><button class="audit-inline-definition audit-clickable" ${auditAttributes("comparison-difference", "resultado direto do curso")} type="button"><strong>${currency.format(summary.credited - ministrySummary.classes)}</strong><span>resultado direto do curso</span></button></div>
+        <div class="operational-legend"><span><i class="legend-course"></i>Creditado do curso</span><span><i class="legend-classes"></i>Despesas das aulas</span><span class="legend-aside">Outras áreas excluídas: ${currency.format(ministrySummary.general)}</span></div>
+        ${operationalCourseFlowChart(state.records, state.ministryRecords)}
+        <p class="graph-reading"><strong>Critério:</strong> as demais despesas do Ministério ficam fora desta conta. Clique em um mês para abrir receita e custos diretos daquele período.</p>
+      </article>
+
+      <article class="card operational-panel">
+        <div class="operational-panel-head"><div><span class="chart-number">03</span><h3 class="panel-title">Por que o dinheiro ainda não entrou?</h3><p class="panel-subtitle">Separa atraso da operadora, inadimplência do aluno e parcelas que ainda não venceram.</p></div><div class="pending-summary-mini"><span><b>Operadora</b>${currency.format(summary.awaitingCredit)}</span><span><b>Alunos</b>${currency.format(summary.overdue)}</span><span><b>Futuro</b>${currency.format(summary.futureDue)}</span></div></div>
+        <div class="operational-legend"><span><i class="legend-operator"></i>Aguardando operadora</span><span><i class="legend-overdue"></i>Vencido com aluno</span><span><i class="legend-future"></i>Pagamento futuro</span></div>
+        ${pendingAuditChart(state.records)}
+        <p class="graph-reading"><strong>Leitura correta:</strong> pagamento no cartão aguardando repasse não é inadimplência. Clique no mês para saber quais alunos ou repasses formam o valor.</p>
+      </article>
+
+      <article class="card operational-panel">
+        <div class="operational-panel-head"><div><span class="chart-number">04</span><h3 class="panel-title">Como as despesas evoluíram?</h3><p class="panel-subtitle">Mostra mensalmente quanto pertence às aulas e quanto pertence às demais atividades do Ministério.</p></div><div class="audit-inline-definition"><strong>${currency.format(ministrySummary.exits)}</strong><span>saídas acumuladas</span></div></div>
+        <div class="operational-legend"><span><i class="legend-classes"></i>Despesas das aulas</span><span><i class="legend-general"></i>Outras áreas</span></div>
+        ${ministryExpenseTrendChart(state.ministryRecords)}
+        <p class="graph-reading"><strong>Por que importa:</strong> evidencia quando houve concentração de gastos. Clique no mês para conferir destinos e categorias.</p>
+      </article>
+
+      <article class="card operational-panel projection-panel">
+        <div class="operational-panel-head"><div><span class="chart-number">05</span><h3 class="panel-title">Qual é o cenário planejado até dezembro?</h3><p class="panel-subtitle">Premissas informadas pelo Ministério. Não são lançamentos realizados nem créditos bancários confirmados.</p></div><span class="projection-badge">Projeção gerencial</span></div>
+        ${projectionScenarioChart()}
+        <div class="projection-details-grid">
+          <button class="projection-detail audit-clickable" ${auditAttributes("plan-fixed-general", "despesas gerais fixas planejadas")} type="button"><span>Despesas gerais fixas</span><strong>${currency.format(plan.fixedGeneral)}</strong><small>R$ 850,00 × 4 meses</small></button>
+          <button class="projection-detail audit-clickable" ${auditAttributes("plan-year-expenses", "despesas totais planejadas")} type="button"><span>Despesas totais planejadas</span><strong>${currency.format(plan.totalExpenses)}</strong><small>Curso + despesas gerais</small></button>
+          <button class="projection-detail projection-detail-result audit-clickable" ${auditAttributes("plan-deficit-base", "cenário confirmado até dezembro")} type="button"><span>Cenário confirmado</span><strong>${currency.format(plan.certainDeficit)}</strong><small>Sem valores incertos</small></button>
+        </div>
+        <p class="graph-reading graph-reading-warning"><strong>Atenção de auditoria:</strong> a possível entrada de Alex e a recuperação da inadimplência ficam fora do cenário confirmado. A verba de Alex precisa ser conciliada para não duplicar a entrada recorrente já cadastrada.</p>
+      </article>
+    </div>
+  </section>`;
+}
+
 function renderApp() {
   const summary = summarize(state.records);
   const ministrySummary = summarizeMinistry(state.ministryRecords);
   const forecastTotal = buildCreditTimeline(state.records)
     .filter((item) => item.month === 9 || item.month === 10)
     .reduce((total, item) => total + item.forecast, 0);
+  const registeredEntries = summary.credited + ministrySummary.entries;
+  const registeredNet = registeredEntries - ministrySummary.exits;
   const app = document.querySelector("#app");
 
   app.innerHTML = `
@@ -866,16 +1600,15 @@ function renderApp() {
         <nav class="side-nav" id="side-navigation" aria-label="Seções do painel">
           <button class="nav-item ${state.activeView === "presentation" ? "active" : ""}" data-target="presentation" aria-current="${state.activeView === "presentation" ? "page" : "false"}">${icons.spark}<span>Apresentação</span></button>
           <button class="nav-item ${state.activeView === "overview" ? "active" : ""}" data-target="overview" aria-current="${state.activeView === "overview" ? "page" : "false"}">${icons.overview}<span>Visão geral</span></button>
-          <button class="nav-item ${state.activeView === "participants" ? "active" : ""}" data-target="participants" aria-current="${state.activeView === "participants" ? "page" : "false"}">${icons.people}<span>Valores por pessoa</span></button>
-          <button class="nav-item ${state.activeView === "cashflow" ? "active" : ""}" data-target="cashflow" aria-current="${state.activeView === "cashflow" ? "page" : "false"}">${icons.chart}<span>Fluxo mensal</span></button>
-          <button class="nav-item ${state.activeView === "ministry" ? "active" : ""}" data-target="ministry" aria-current="${state.activeView === "ministry" ? "page" : "false"}">${icons.money}<span>Finanças do Ministério</span></button>
-          <button class="nav-item ${state.activeView === "transactions" ? "active" : ""}" data-target="transactions" aria-current="${state.activeView === "transactions" ? "page" : "false"}">${icons.rows}<span>Tabela</span></button>
+          <button class="nav-item ${state.activeView === "participants" ? "active" : ""}" data-target="participants" aria-current="${state.activeView === "participants" ? "page" : "false"}">${icons.people}<span>Curso e alunos</span></button>
+          <button class="nav-item ${state.activeView === "ministry" ? "active" : ""}" data-target="ministry" aria-current="${state.activeView === "ministry" ? "page" : "false"}">${icons.money}<span>Ministério e despesas</span></button>
+          <button class="nav-item ${state.activeView === "cashflow" ? "active" : ""}" data-target="cashflow" aria-current="${state.activeView === "cashflow" ? "page" : "false"}">${icons.chart}<span>Fluxo e projeções</span></button>
         </nav>
         <button class="mobile-menu-backdrop" type="button" aria-label="Fechar menu"></button>
         <div class="side-source">
           <div class="source-line"><i class="source-dot"></i>Fonte conectada</div>
           <p class="source-file">${safe(state.sourceName)}</p>
-          <p class="source-file source-file-secondary">finançassinaisdoreino.csv</p>
+          <p class="source-file source-file-secondary">finançassinaisdoreino.json + entradas cadastradas</p>
         </div>
       </aside>
 
@@ -896,139 +1629,25 @@ function renderApp() {
           <div id="presentation-region"></div>
         </section>
 
-        <section class="kpi-grid app-view" data-view="overview" aria-label="Indicadores financeiros">
-          <article class="card kpi-card kpi-card-primary audit-clickable" ${auditAttributes("course-credited", "recebido líquido pelo Ministério")}>
-            <div class="kpi-head"><span class="kpi-label">Recebido líquido pelo Ministério</span><span class="kpi-icon">${icons.bank}</span></div>
-            <div class="kpi-value">${currency.format(summary.credited)}</div>
-            <p class="kpi-note">Soma do Valor Creditado: dinheiro que realmente entrou na conta.</p>
-          </article>
-          <article class="card kpi-card audit-clickable" ${auditAttributes("course-awaiting", "pago aguardando crédito")}>
-            <div class="kpi-head"><span class="kpi-label">Pago, aguardando crédito</span><span class="kpi-icon">${icons.clock}</span></div>
-            <div class="kpi-value">${currency.format(summary.awaitingCredit)}</div>
-            <p class="kpi-note">Pagamentos feitos no cartão que serão creditados posteriormente pela operadora na conta do Ministério.</p>
-          </article>
-          <article class="card kpi-card kpi-forecast audit-clickable" ${auditAttributes("course-future", "previsão de setembro e outubro")}>
-            <div class="kpi-head"><span class="kpi-label">Previsão setembro + outubro</span><span class="kpi-icon">${icons.chart}</span></div>
-            <div class="kpi-value">${currency.format(forecastTotal)}</div>
-            <p class="kpi-note">Previsão bruta pelas datas informadas; o líquido pode sofrer tarifas.</p>
-          </article>
-          <article class="card kpi-card kpi-card-danger audit-clickable" ${auditAttributes("course-overdue", "inadimplência vencida")}>
-            <div class="kpi-head"><span class="kpi-label">Inadimplência vencida</span><span class="kpi-icon">${icons.clock}</span></div>
-            <div class="kpi-value">${currency.format(summary.overdue)}</div>
-            <p class="kpi-note">Parcelas vencidas cujo Valor Pago ainda não cobre o previsto.</p>
-          </article>
-          <article class="card kpi-card audit-clickable" ${auditAttributes("course-receivable", "valor total cadastrado")}>
-            <div class="kpi-head"><span class="kpi-label">Valor total cadastrado</span><span class="kpi-icon">${icons.money}</span></div>
-            <div class="kpi-value">${currency.format(summary.receivable)}</div>
-            <p class="kpi-note">Soma do Valor à Receber. Não representa dinheiro em conta.</p>
-          </article>
-          <article class="card kpi-card kpi-card-info audit-clickable" ${auditAttributes("course-paid", "pago pelos alunos")}>
-            <div class="kpi-head"><span class="kpi-label">Pago pelos alunos</span><span class="kpi-icon">${icons.check}</span></div>
-            <div class="kpi-value">${currency.format(summary.paid)}</div>
-            <p class="kpi-note">Informativo: saiu da conta dos alunos, mas não significa que o Ministério recebeu.</p>
-          </article>
-          <article class="card kpi-card audit-clickable" ${auditAttributes("course-fees", "tarifas e taxas do cartão")}>
-            <div class="kpi-head"><span class="kpi-label">Tarifas e taxas do cartão</span><span class="kpi-icon">${icons.money}</span></div>
-            <div class="kpi-value">${currency.format(summary.fees)}</div>
-            <p class="kpi-note">Soma das tarifas e taxas financeiras cobradas pela manutenção e pelo processamento dos pagamentos no cartão de crédito.</p>
-          </article>
-        </section>
-
-        <section class="card ministry-overview-card app-view" data-view="overview" aria-label="Resumo das finanças do Ministério">
-          <div class="ministry-overview-head">
-            <div>
-              <p class="eyebrow">Base finançassinaisdoreino</p>
-              <h2 class="panel-title">Despesas registradas pelo Ministério</h2>
-              <p class="panel-subtitle">Resumo separado da receita do Curso de Libras para não misturar bases com finalidades diferentes.</p>
-            </div>
-            <button class="button" id="open-ministry-view" type="button">Ver lançamentos ${icons.arrow}</button>
+        <section class="overview-executive app-view" data-view="overview" aria-label="Resumo executivo da auditoria">
+          <div class="overview-executive-heading"><div><p class="eyebrow">Leitura executiva</p><h2 class="section-title">O essencial para entender o dinheiro</h2><p class="section-copy">Os cards resumem as duas bases. Clique em qualquer valor para conferir a conta e os lançamentos de origem.</p></div><span class="audit-basis-pill">Dados registrados · não conciliados com extrato</span></div>
+          <div class="kpi-grid executive-kpi-grid">
+            <article class="card kpi-card kpi-card-primary audit-clickable" ${auditAttributes("course-credited", "recebido líquido do curso")}><div class="kpi-head"><span class="kpi-label">Recebido líquido do curso</span><span class="kpi-icon">${icons.bank}</span></div><div class="kpi-value">${currency.format(summary.credited)}</div><p class="kpi-note">Somente Valor Creditado: dinheiro líquido registrado como recebido do curso.</p></article>
+            <article class="card kpi-card audit-clickable" ${auditAttributes("ministry-entries", "entradas administrativas")}><div class="kpi-head"><span class="kpi-label">Entradas administrativas</span><span class="kpi-icon">${icons.money}</span></div><div class="kpi-value">${currency.format(ministrySummary.entries)}</div><p class="kpi-note">R$ 1.500,00 mensais cadastrados de janeiro a setembro; comprovação bancária pendente.</p></article>
+            <article class="card kpi-card kpi-card-info audit-clickable" ${auditAttributes("combined-entries", "todas as entradas registradas")}><div class="kpi-head"><span class="kpi-label">Todas as entradas registradas</span><span class="kpi-icon">${icons.check}</span></div><div class="kpi-value">${currency.format(registeredEntries)}</div><p class="kpi-note">Crédito líquido do curso + entradas administrativas cadastradas.</p></article>
+            <article class="card kpi-card kpi-card-danger audit-clickable" ${auditAttributes("ministry-exits", "todas as saídas registradas")}><div class="kpi-head"><span class="kpi-label">Todas as saídas registradas</span><span class="kpi-icon">${icons.money}</span></div><div class="kpi-value">${currency.format(ministrySummary.exits)}</div><p class="kpi-note">Inclui despesas das aulas e despesas das demais áreas do Ministério.</p></article>
+            <article class="card kpi-card ${registeredNet < 0 ? "kpi-card-danger" : "kpi-card-result"} audit-clickable" ${auditAttributes("registered-net", "resultado registrado")}><div class="kpi-head"><span class="kpi-label">Resultado registrado</span><span class="kpi-icon">${icons.chart}</span></div><div class="kpi-value">${currency.format(registeredNet)}</div><p class="kpi-note">Entradas registradas − saídas registradas. Não inclui ${currency.format(summary.awaitingCredit)} aguardando a operadora nem ${currency.format(summary.overdue)} de inadimplência.</p></article>
+            <article class="card kpi-card kpi-attention-card"><div class="kpi-head"><span class="kpi-label">Pendências e previsão</span><span class="kpi-icon">${icons.clock}</span></div><div class="attention-lines"><button class="audit-clickable" ${auditAttributes("course-awaiting", "aguardando operadora")} type="button"><span>Aguardando operadora</span><strong>${currency.format(summary.awaitingCredit)}</strong></button><button class="audit-clickable" ${auditAttributes("course-overdue", "inadimplência dos alunos")} type="button"><span>Inadimplência vencida</span><strong>${currency.format(summary.overdue)}</strong></button><button class="audit-clickable" ${auditAttributes("course-future", "previsão de setembro e outubro")} type="button"><span>Repasse previsto set. + out.</span><strong>${currency.format(forecastTotal)}</strong></button></div><small class="attention-overlap-note">Não some os três valores: a previsão por mês pode fazer parte do total aguardando a operadora.</small></article>
           </div>
-          <div class="ministry-overview-metrics">
-            <div class="ministry-overview-primary audit-clickable" ${auditAttributes("ministry-exits", "total de saídas")}><span>Total de saídas</span><strong>${currency.format(ministrySummary.exits)}</strong><small>${number.format(ministrySummary.count)} lançamentos</small></div>
-            <div class="audit-clickable" ${auditAttributes("ministry-classes", "despesas do núcleo de aulas")}><span>Núcleo de aulas</span><strong>${currency.format(ministrySummary.classes)}</strong><small>Pagamentos e despesas de aulas</small></div>
-            <div class="audit-clickable" ${auditAttributes("ministry-general", "despesas gerais")}><span>Despesas gerais</span><strong>${currency.format(ministrySummary.general)}</strong><small>Demais despesas do Ministério</small></div>
-            <div class="audit-clickable" ${auditAttributes("ministry-all", "período da base administrativa")}><span>Período da base</span><strong>Jan — Ago/2026</strong><small>Todos os registros atuais são saídas via Pix</small></div>
-          </div>
-        </section>
-
-        <section class="overview-tables-grid app-view" data-view="overview" aria-label="Créditos mensais e inadimplência">
-          <article class="card overview-data-card">
-            <div class="overview-data-head">
-              <div>
-                <p class="eyebrow">Crédito por competência</p>
-                <h2 class="panel-title">Valores creditados por mês</h2>
-                <p class="panel-subtitle">Cada mês separa o que entrou, o que venceu sem crédito e a previsão futura</p>
-              </div>
-              <div class="mini-legend"><span><i></i>Realizado</span><span><i></i>A conciliar</span><span><i></i>Previsão futura</span></div>
-            </div>
-            <div class="compact-table-wrap">
-              <table class="compact-table credit-month-table">
-                <thead><tr><th>Mês</th><th>Creditado líquido</th><th>Crédito vencido</th><th>Previsão futura</th></tr></thead>
-                <tbody>${renderCreditTimeline(state.records)}</tbody>
-              </table>
-            </div>
-            <p class="table-data-note">“Creditado líquido” é dinheiro em conta. “Crédito vencido” foi pago, mas a previsão terminou sem Valor Creditado. “Previsão futura” começa em setembro e poderá sofrer tarifas.</p>
-          </article>
-
-          <article class="card overview-data-card">
-            <div class="overview-data-head">
-              <div>
-                <p class="eyebrow eyebrow-alert">Acompanhamento</p>
-                <h2 class="panel-title">Inadimplentes</h2>
-                <p class="panel-subtitle">Pessoas com parcelas vencidas e saldo ainda não pago</p>
-              </div>
-              <span class="defaulter-count">${buildDefaulters(state.records).length} pessoas</span>
-            </div>
-            <div class="defaulter-total-card audit-clickable" ${auditAttributes("course-overdue", "soma dos inadimplentes")}>
-              <span class="defaulter-total-icon">${icons.clock}</span>
-              <div><span>Soma dos inadimplentes</span><strong>${currency.format(sumDefaulters(state.records))}</strong><small>Saldo das parcelas vencidas não pagas</small></div>
-            </div>
-            <div class="compact-table-wrap">
-              <table class="compact-table defaulter-table">
-                <thead><tr><th>Participante</th><th>Tipo da inadimplência</th><th>Parcelas e vencimentos</th><th>Em aberto</th></tr></thead>
-                <tbody>${renderDefaulters(state.records)}</tbody>
-              </table>
-            </div>
-          </article>
-        </section>
-
-        <section class="flow-section app-view" id="cashflow" data-view="cashflow">
-          <div class="flow-heading">
-            <div><p class="eyebrow">Análise visual</p><h2 class="section-title">Fluxo mensal</h2><p class="section-copy">Quatro leituras financeiras, incluindo o comparativo mensal entre o dinheiro que entrou e o que saiu.</p></div>
-            <span class="participant-total-badge">4 gráficos</span>
-          </div>
-          <div class="flow-grid">
-            <article class="card panel flow-card-full">
-              <div class="panel-head">
-                <div><span class="chart-number">01</span><h3 class="panel-title">Receita do curso x despesas das aulas</h3><p class="panel-subtitle">Receita usa somente o Valor Creditado do curso. Despesa usa somente saídas com finance_kind = aulas.</p></div>
-                <div class="flow-panel-aside">
-                  <div class="legend"><span><i style="background:#006cfc"></i>Receita do curso</span><span><i style="background:#b85543"></i>Despesas das aulas</span></div>
-                  <div class="flow-excluded-expense audit-clickable" ${auditAttributes("ministry-general", "despesas de outras áreas")}><span>Outras áreas · fora do comparativo</span><strong>${currency.format(ministrySummary.general)}</strong></div>
-                </div>
-              </div>
-              ${cashFlowComparisonChart(state.records, state.ministryRecords)}
-            </article>
-            <article class="card panel">
-              <div class="panel-head"><div><span class="chart-number">02</span><h3 class="panel-title">Previsão futura de crédito</h3><p class="panel-subtitle">Somente parcelas previstas a partir de setembro; agosto não entra como previsão futura.</p></div><span class="chart-definition chart-definition-orange">Estimativa bruta</span></div>
-              ${singleSeriesChart(forecastCreditSeries(state.records), "orange")}
-            </article>
-            <article class="card panel">
-              <div class="panel-head"><div><span class="chart-number">03</span><h3 class="panel-title">Formas de pagamento</h3><p class="panel-subtitle">Distribuição do Valor Pago informado pelos alunos.</p></div><span class="chart-definition chart-definition-blue">Informativo</span></div>
-              ${methodsChart(state.records)}
-            </article>
-            <article class="card panel flow-card-full">
-              <div class="panel-head"><div><span class="chart-number">04</span><h3 class="panel-title">Inadimplência por vencimento</h3><p class="panel-subtitle">Saldo das parcelas vencidas que ainda não foram pagas.</p></div><span class="chart-definition chart-definition-red">Cobrança necessária</span></div>
-              ${singleSeriesChart(delinquencySeries(state.records), "red")}
-            </article>
-          </div>
+          <div class="overview-reconciliation-note"><span>${icons.bank}</span><p><strong>Limite desta auditoria:</strong> os totais refletem os registros disponíveis. Saldo inicial, extrato bancário, comprovantes e possíveis transferências internas ainda precisam ser conciliados para afirmar o saldo da conta.</p></div>
         </section>
 
         <section class="participants-section app-view" id="participants" data-view="participants">
           <div class="participant-heading">
             <div>
               <p class="eyebrow">Auditoria individual</p>
-              <h2 class="section-title">Valores por aluno</h2>
-              <p class="section-copy">Uma linha por pessoa. O valor creditado líquido é o dinheiro realmente recebido pelo Ministério.</p>
+              <h2 class="section-title">Curso e alunos</h2>
+              <p class="section-copy">Pessoas, inadimplência e parcelas ficam reunidas em uma única sequência, sem repetir os cards da Visão geral.</p>
             </div>
             <div class="participant-total-badge">${number.format(summary.people)} alunos</div>
           </div>
@@ -1063,75 +1682,54 @@ function renderApp() {
               <p><strong>Leitura:</strong> “Creditado líquido” é o valor real recebido. “Pago pelo aluno” é informativo. “Ainda vai cair” reúne pagamentos com crédito zerado. “Devendo” considera parcelas vencidas não pagas.</p>
             </div>
           </article>
+
+          <article class="card course-overdue-section">
+            <div class="overview-data-head"><div><p class="eyebrow eyebrow-alert">Cobrança</p><h3 class="panel-title">Quem está inadimplente</h3><p class="panel-subtitle">A tabela diferencia pagamento único nunca pago de parcelas específicas em atraso.</p></div><button class="defaulter-count audit-clickable" ${auditAttributes("course-overdue", "soma dos inadimplentes")} type="button">${buildDefaulters(state.records).length} pessoas · ${currency.format(sumDefaulters(state.records))}</button></div>
+            <div class="compact-table-wrap"><table class="compact-table defaulter-table"><thead><tr><th>Participante</th><th>Tipo da inadimplência</th><th>Parcelas e vencimentos</th><th>Em aberto</th></tr></thead><tbody>${renderDefaulters(state.records)}</tbody></table></div>
+          </article>
+
+          <article class="card table-card course-ledger-card">
+            <div class="table-top"><div><p class="eyebrow">Base da auditoria</p><h3 class="panel-title">Todas as parcelas do curso</h3><p class="panel-subtitle">Uma linha por parcela. Os filtros atualizam todos os resultados abaixo sem criar páginas.</p></div><button class="button" id="clear-filters" type="button">Limpar filtros</button></div>
+            <div class="quick-filter-bar" aria-label="Filtros rápidos"><button class="quick-filter active" data-quick-status="Todos" type="button">Todos</button><button class="quick-filter quick-filter-danger" data-quick-status="Em atraso" type="button">Inadimplentes</button><button class="quick-filter quick-filter-orange" data-quick-status="A creditar" type="button">Aguardando crédito</button><button class="quick-filter quick-filter-green" data-quick-status="Creditado" type="button">Já creditados</button></div>
+            <div class="advanced-filters">
+              <label class="search-box" aria-label="Buscar participante">${icons.search}<input id="search-input" type="search" placeholder="Buscar nome ou parcela…" /></label>
+              <label class="filter-field"><span>Aluno</span><select class="select" id="donor-filter"><option>Todas as pessoas</option>${[...new Set(state.records.map((item) => item.donor))].sort((a, b) => a.localeCompare(b, "pt-BR")).map((name) => `<option value="${safe(name)}">${safe(name)}</option>`).join("")}</select></label>
+              <label class="filter-field"><span>Pagamento</span><select class="select" id="method-filter" aria-label="Filtrar por meio de pagamento"><option>Todos os meios</option>${[...new Set(state.records.map((item) => item.method))].sort().map((method) => `<option>${safe(method)}</option>`).join("")}</select></label>
+              <label class="filter-field"><span>Situação</span><select class="select" id="status-filter" aria-label="Filtrar por status"><option>Todos os status</option><option>Creditado</option><option>A creditar</option><option>Em atraso</option><option>Pendente</option></select></label>
+              <label class="filter-field"><span>Parcela</span><select class="select" id="installment-filter"><option>Todas as parcelas</option>${[...new Set(state.records.map((item) => item.installment))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true })).map((installment) => `<option>${safe(installment)}</option>`).join("")}</select></label>
+              <label class="filter-field date-field"><span>Vencimento inicial</span><input class="date-input" id="date-from" type="date" /></label><label class="filter-field date-field"><span>Vencimento final</span><input class="date-input" id="date-to" type="date" /></label>
+            </div>
+            <div id="table-region"></div>
+          </article>
         </section>
 
-        <section class="card ministry-section app-view" id="ministry" data-view="ministry">
+        <section class="ministry-section app-view" id="ministry" data-view="ministry">
           <div class="table-top ministry-table-top">
             <div>
-              <p class="eyebrow">Base exclusiva</p>
-              <h2 class="section-title">Finanças Sinais do Reino</h2>
-              <p class="panel-subtitle">Lançamentos administrativos importados de finançassinaisdoreino.csv</p>
+              <p class="eyebrow">Auditoria das saídas</p>
+              <h2 class="section-title">Ministério e despesas</h2>
+              <p class="panel-subtitle">Destino dos gastos, interpretação e lançamentos administrativos em uma única área.</p>
             </div>
-            <button class="button" id="clear-ministry-filters" type="button">Limpar filtros</button>
           </div>
           <div class="ministry-source-note">
             <span>${icons.money}</span>
-            <p><strong>Escopo desta aba:</strong> despesas gerais e de aulas do Ministério. Estes valores permanecem separados dos recebimentos dos alunos.</p>
+            <p><strong>Escopo:</strong> entradas administrativas, despesas gerais e despesas das aulas. Os créditos dos alunos permanecem na área do curso.</p>
           </div>
-          <div class="advanced-filters ministry-filters">
-            <label class="search-box" aria-label="Buscar nas finanças do Ministério">${icons.search}<input id="ministry-search" type="search" placeholder="Buscar categoria, pessoa ou descrição…" /></label>
-            <label class="filter-field"><span>Núcleo</span><select class="select" id="ministry-kind-filter">
-              <option value="">Todos os núcleos</option>
-              ${[...new Set(state.ministryRecords.map((item) => item.financeKind))].sort().map((kind) => `<option value="${safe(kind)}">${safe(kind)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field"><span>Tipo</span><select class="select" id="ministry-type-filter">
-              <option value="">Todos os tipos</option>
-              ${[...new Set(state.ministryRecords.map((item) => item.type))].sort().map((type) => `<option value="${safe(type)}">${safe(type)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field"><span>Categoria</span><select class="select" id="ministry-category-filter">
-              <option value="">Todas as categorias</option>
-              ${[...new Set(state.ministryRecords.map((item) => item.category))].sort((a, b) => a.localeCompare(b, "pt-BR")).map((category) => `<option value="${safe(category)}">${safe(category)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field date-field"><span>Data inicial</span><input class="date-input" id="ministry-date-from" type="date" /></label>
-            <label class="filter-field date-field"><span>Data final</span><input class="date-input" id="ministry-date-to" type="date" /></label>
-          </div>
-          <div id="ministry-table-region"></div>
+          ${renderMinistryAuditContent(ministrySummary)}
+          <article class="card ministry-ledger-card">
+            <div class="table-top ministry-table-top"><div><p class="eyebrow">Base administrativa</p><h3 class="panel-title">Todos os lançamentos do Ministério</h3><p class="panel-subtitle">Use os filtros para conferir pessoas, categorias, datas e motivos.</p></div><button class="button" id="clear-ministry-filters" type="button">Limpar filtros</button></div>
+            <div class="advanced-filters ministry-filters">
+              <label class="search-box" aria-label="Buscar nas finanças do Ministério">${icons.search}<input id="ministry-search" type="search" placeholder="Buscar categoria, pessoa ou descrição…" /></label>
+              <label class="filter-field"><span>Núcleo</span><select class="select" id="ministry-kind-filter"><option value="">Todos os núcleos</option>${[...new Set(state.ministryRecords.map((item) => item.financeKind))].sort().map((kind) => `<option value="${safe(kind)}">${safe(kind)}</option>`).join("")}</select></label>
+              <label class="filter-field"><span>Tipo</span><select class="select" id="ministry-type-filter"><option value="">Todos os tipos</option>${[...new Set(state.ministryRecords.map((item) => item.type))].sort().map((type) => `<option value="${safe(type)}">${safe(type)}</option>`).join("")}</select></label>
+              <label class="filter-field"><span>Categoria</span><select class="select" id="ministry-category-filter"><option value="">Todas as categorias</option>${[...new Set(state.ministryRecords.map((item) => item.category))].sort((a, b) => a.localeCompare(b, "pt-BR")).map((category) => `<option value="${safe(category)}">${safe(category)}</option>`).join("")}</select></label>
+              <label class="filter-field date-field"><span>Data inicial</span><input class="date-input" id="ministry-date-from" type="date" /></label><label class="filter-field date-field"><span>Data final</span><input class="date-input" id="ministry-date-to" type="date" /></label>
+            </div>
+            <div id="ministry-table-region"></div>
+          </article>
         </section>
 
-        <section class="card table-card app-view" id="transactions" data-view="transactions">
-          <div class="table-top">
-            <div><p class="eyebrow">Base completa</p><h2 class="section-title">Tabela financeira</h2><p class="panel-subtitle">Todos os campos relevantes da planilha, uma linha por parcela</p></div>
-            <button class="button" id="clear-filters" type="button">Limpar filtros</button>
-          </div>
-          <div class="quick-filter-bar" aria-label="Filtros rápidos">
-            <button class="quick-filter active" data-quick-status="Todos" type="button">Todos</button>
-            <button class="quick-filter quick-filter-danger" data-quick-status="Em atraso" type="button">Inadimplentes</button>
-            <button class="quick-filter quick-filter-orange" data-quick-status="A creditar" type="button">Aguardando crédito</button>
-            <button class="quick-filter quick-filter-green" data-quick-status="Creditado" type="button">Já creditados</button>
-          </div>
-          <div class="advanced-filters">
-            <label class="search-box" aria-label="Buscar participante">${icons.search}<input id="search-input" type="search" placeholder="Buscar nome ou parcela…" /></label>
-            <label class="filter-field"><span>Aluno</span><select class="select" id="donor-filter">
-              <option>Todas as pessoas</option>
-              ${[...new Set(state.records.map((item) => item.donor))].sort((a, b) => a.localeCompare(b, "pt-BR")).map((name) => `<option value="${safe(name)}">${safe(name)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field"><span>Pagamento</span><select class="select" id="method-filter" aria-label="Filtrar por meio de pagamento">
-              <option>Todos os meios</option>
-              ${[...new Set(state.records.map((item) => item.method))].sort().map((method) => `<option>${safe(method)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field"><span>Situação</span><select class="select" id="status-filter" aria-label="Filtrar por status">
-              <option>Todos os status</option>
-              <option>Creditado</option><option>A creditar</option><option>Em atraso</option><option>Pendente</option>
-            </select></label>
-            <label class="filter-field"><span>Parcela</span><select class="select" id="installment-filter">
-              <option>Todas as parcelas</option>
-              ${[...new Set(state.records.map((item) => item.installment))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true })).map((installment) => `<option>${safe(installment)}</option>`).join("")}
-            </select></label>
-            <label class="filter-field date-field"><span>Vencimento inicial</span><input class="date-input" id="date-from" type="date" /></label>
-            <label class="filter-field date-field"><span>Vencimento final</span><input class="date-input" id="date-to" type="date" /></label>
-          </div>
-          <div id="table-region"></div>
-        </section>
+        ${renderOperationalCashflow(summary, ministrySummary)}
       </main>
     </div>`;
 
@@ -1191,7 +1789,7 @@ function bindAppEvents() {
     });
   });
 
-  document.querySelector("#open-ministry-view").addEventListener("click", () => activateView("ministry", true));
+  document.querySelector("#open-ministry-view")?.addEventListener("click", () => activateView("ministry", true));
 
   document.querySelector("#ministry-search").addEventListener("input", (event) => {
     state.ministrySearch = event.target.value.trim().toLocaleLowerCase("pt-BR");
@@ -1451,11 +2049,8 @@ function renderParticipants() {
     const matchesStatus = state.participantStatus === "Todos" || person.status === state.participantStatus;
     return matchesSearch && matchesName && matchesStatus;
   });
-  const totalPages = Math.max(Math.ceil(participants.length / state.participantPerPage), 1);
-  state.participantPage = Math.min(state.participantPage, totalPages);
-  const start = (state.participantPage - 1) * state.participantPerPage;
-  const pageRows = participants.slice(start, start + state.participantPerPage);
-  const filteredTotals = pageRows.length
+  const pageRows = participants;
+  const filteredTotals = participants.length
     ? participants.reduce(
         (totals, person) => {
           totals.paid += person.paid;
@@ -1485,14 +2080,6 @@ function renderParticipants() {
         .join("")
     : `<tr><td colspan="8" class="empty-state">Nenhuma pessoa corresponde aos filtros.</td></tr>`;
 
-  const pageButtons = getParticipantPageButtons(totalPages)
-    .map((page) =>
-      page === "…"
-        ? `<span>…</span>`
-        : `<button class="page-button ${page === state.participantPage ? "active" : ""}" data-participant-page="${page}" type="button">${page}</button>`,
-    )
-    .join("");
-
   region.innerHTML = `
     <div class="table-wrap people-table-wrap">
       <table class="people-table">
@@ -1502,24 +2089,11 @@ function renderParticipants() {
       </table>
     </div>
     <footer class="table-footer">
-      <span>Mostrando ${pageRows.length ? start + 1 : 0}–${Math.min(start + state.participantPerPage, participants.length)} de ${number.format(participants.length)} pessoas</span>
-      <div class="pagination">
-        <button class="page-button" data-participant-page="prev" type="button" ${state.participantPage === 1 ? "disabled" : ""} aria-label="Página anterior">‹</button>
-        ${pageButtons}
-        <button class="page-button" data-participant-page="next" type="button" ${state.participantPage === totalPages ? "disabled" : ""} aria-label="Próxima página">›</button>
-      </div>
+      <span>Exibindo todas as ${number.format(participants.length)} pessoas que correspondem aos filtros.</span>
     </footer>`;
 
   region.querySelectorAll("[data-participant]").forEach((button) => {
     button.addEventListener("click", () => openParticipantDrawer(button.dataset.participant));
-  });
-  region.querySelectorAll("[data-participant-page]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (button.dataset.participantPage === "prev") state.participantPage -= 1;
-      else if (button.dataset.participantPage === "next") state.participantPage += 1;
-      else state.participantPage = Number(button.dataset.participantPage);
-      renderParticipants();
-    });
   });
 }
 
@@ -1532,9 +2106,7 @@ function getParticipantPageButtons(totalPages) {
 
 function renderTable() {
   const region = document.querySelector("#table-region");
-  const totalPages = Math.max(Math.ceil(state.filtered.length / state.perPage), 1);
-  const start = (state.page - 1) * state.perPage;
-  const rows = state.filtered.slice(start, start + state.perPage);
+  const rows = state.filtered;
 
   const body = rows.length
     ? rows
@@ -1558,14 +2130,6 @@ function renderTable() {
         .join("")
     : `<tr><td colspan="13" class="empty-state">Nenhum lançamento corresponde aos filtros.</td></tr>`;
 
-  const pageButtons = getPageButtons(totalPages)
-    .map((page) =>
-      page === "…"
-        ? `<span>…</span>`
-        : `<button class="page-button ${page === state.page ? "active" : ""}" data-page="${page}" type="button">${page}</button>`,
-    )
-    .join("");
-
   region.innerHTML = `
     <div class="table-wrap">
       <table>
@@ -1574,24 +2138,11 @@ function renderTable() {
       </table>
     </div>
     <footer class="table-footer">
-      <span>Mostrando ${rows.length ? start + 1 : 0}–${Math.min(start + state.perPage, state.filtered.length)} de ${number.format(state.filtered.length)} lançamentos</span>
-      <div class="pagination">
-        <button class="page-button" data-page="prev" type="button" ${state.page === 1 ? "disabled" : ""} aria-label="Página anterior">‹</button>
-        ${pageButtons}
-        <button class="page-button" data-page="next" type="button" ${state.page === totalPages ? "disabled" : ""} aria-label="Próxima página">›</button>
-      </div>
+      <span>Exibindo todos os ${number.format(state.filtered.length)} lançamentos que correspondem aos filtros.</span>
     </footer>`;
 
   region.querySelectorAll("[data-record-id]").forEach((button) => {
     button.addEventListener("click", () => openDrawer(button.dataset.recordId));
-  });
-  region.querySelectorAll("[data-page]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (button.dataset.page === "prev") state.page -= 1;
-      else if (button.dataset.page === "next") state.page += 1;
-      else state.page = Number(button.dataset.page);
-      renderTable();
-    });
   });
 }
 
@@ -1617,7 +2168,7 @@ function courseAuditBreakdown(key) {
     "course-credited": {
       title: "Recebido líquido pelo Ministério",
       valueLabel: "Valor Creditado",
-      formula: "Soma da coluna Valor Creditado nas linhas em que o crédito líquido é maior que zero.",
+      formula: "Valor Pago − tarifas da operadora de cartão − parcelas pagas ainda não creditadas = Valor Creditado líquido.",
       relevance: "É o dinheiro líquido realmente disponível para o Ministério. Por isso, este é o número correto para comparar a receita do curso com o custo das aulas.",
       predicate: (record) => record.credited > 0,
       value: (record) => record.credited,
@@ -1674,7 +2225,7 @@ function courseAuditBreakdown(key) {
     "course-paid": {
       title: "Pago pelos alunos",
       valueLabel: "Valor Pago",
-      formula: "Soma da coluna Valor Pago. Este valor é informativo e não representa necessariamente dinheiro creditado na conta do Ministério.",
+      formula: "Soma da coluna Valor Pago. É um valor informativo, antes dos descontos da operadora de cartão.",
       relevance: "Permite conferir o que os alunos efetivamente pagaram e separar esse momento do repasse líquido feito pela operadora.",
       predicate: (record) => record.paid > 0,
       value: (record) => record.paid,
@@ -1790,19 +2341,48 @@ function courseAuditBreakdown(key) {
     "course-paid": (record) => `Pago em ${record.receivedAt || "data não informada"}`,
     "course-fees": (record) => `Tarifa sobre o pagamento de ${currency.format(record.paid)}`,
   };
+  const groupingRecords = displayKey === "course-credited"
+    ? state.records
+      .filter((record) => record.paid > 0)
+      .sort((a, b) => a.donor.localeCompare(b.donor, "pt-BR") || (parseDate(a.dueDate)?.getTime() || 0) - (parseDate(b.dueDate)?.getTime() || 0))
+    : records;
   const groupMap = new Map();
-  records.forEach((record) => {
-    if (!groupMap.has(record.donor)) groupMap.set(record.donor, { label: record.donor, total: 0, lines: [] });
+  groupingRecords.forEach((record) => {
+    if (!groupMap.has(record.donor)) {
+      groupMap.set(record.donor, {
+        label: record.donor,
+        total: 0,
+        paid: 0,
+        fees: 0,
+        awaitingCredit: 0,
+        lines: [],
+      });
+    }
     const group = groupMap.get(record.donor);
-    const value = definition.value(record);
+    const value = displayKey === "course-credited" ? record.credited : definition.value(record);
     group.total += value;
+    group.paid += record.paid;
+    group.fees += Math.abs(record.fee);
+    if (record.paid > 0 && record.credited === 0) group.awaitingCredit += record.paid;
     group.lines.push({
       label: `Parcela ${record.installment || "—"}`,
-      context: lineContexts[displayKey](record),
+      context: displayKey === "course-credited"
+        ? `${currency.format(record.paid)} pago − ${currency.format(Math.abs(record.fee))} de taxa − ${currency.format(record.credited === 0 ? record.paid : 0)} ainda não creditado · crédito em ${record.creditedAt || "aguardando"}`
+        : lineContexts[displayKey](record),
       value,
     });
   });
-  const groups = [...groupMap.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label, "pt-BR"));
+  const groups = [...groupMap.values()]
+    .map((group) => displayKey === "course-credited" ? {
+      ...group,
+      totalLabel: "Líquido recebido",
+      calculation: [
+        { label: "Total pago", value: group.paid },
+        { operator: "−", label: "Taxas", value: group.fees },
+        { operator: "−", label: "Ainda não creditado", value: group.awaitingCredit },
+      ],
+    } : group)
+    .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label, "pt-BR"));
 
   return {
     title: definition.title,
@@ -1814,7 +2394,9 @@ function courseAuditBreakdown(key) {
     calculation: calculations[displayKey],
     resultLabel: definition.title,
     groupTitle: "Composição por pessoa",
-    groupHint: "Confira o subtotal de cada pessoa. Abra um nome somente se precisar ver as parcelas.",
+    groupHint: displayKey === "course-credited"
+      ? "Em cada pessoa: total pago − taxas do cartão − parcelas ainda sem crédito = líquido que entrou na conta. Abra um nome para conferir as parcelas."
+      : "Confira o subtotal de cada pessoa. Abra um nome somente se precisar ver as parcelas.",
     groups,
     columns: tableFormat.columns,
     rows: records.map((record) => tableFormat.row(record).map((cell, index, row) => {
@@ -1822,17 +2404,62 @@ function courseAuditBreakdown(key) {
       const content = isValue ? currency.format(cell) : safe(cell);
       return index === 0 || isValue && index === row.length - 1 ? `<strong>${content}</strong>` : content;
     })),
-    note: `${number.format(records.length)} ${records.length === 1 ? "linha encontrada" : "linhas encontradas"} na base do curso.`,
+    factCount: groupingRecords.length,
+    note: displayKey === "course-credited"
+      ? `${number.format(groupingRecords.length)} pagamentos foram considerados para demonstrar o que já entrou e o que ainda aguarda crédito da operadora.`
+      : `${number.format(records.length)} ${records.length === 1 ? "linha encontrada" : "linhas encontradas"} na base do curso.`,
   };
 }
 
 function ministryAuditBreakdown(key) {
+  if (key.startsWith("ministry-category:")) {
+    const [, encodedKind = "", encodedCategory = ""] = key.split(":");
+    const kind = decodeURIComponent(encodedKind);
+    const category = decodeURIComponent(encodedCategory);
+    const records = state.ministryRecords.filter((record) =>
+      record.type.toLocaleLowerCase("pt-BR") === "saida" &&
+      record.financeKind === kind &&
+      record.category === category,
+    );
+    const total = records.reduce((sum, record) => sum + record.amount, 0);
+    return {
+      title: `Despesas de ${category}`,
+      source: "finançassinaisdoreino.json",
+      formula: `Soma das saídas classificadas no núcleo “${kind}” e na categoria “${category}”.`,
+      relevance: "O detalhamento permite conferir quem recebeu, quando o pagamento ocorreu e qual motivo foi registrado.",
+      valueLabel: "Valor da despesa",
+      total,
+      calculation: [{ label: `${number.format(records.length)} lançamentos encontrados`, value: total }],
+      resultLabel: `Total de ${category}`,
+      groupTitle: "Lançamentos da categoria",
+      groupHint: "Cada linha abaixo participa integralmente do total desta categoria.",
+      groups: [{
+        label: category,
+        total,
+        lines: records.map((record) => ({
+          label: record.name || record.eventTitle || record.category,
+          context: `${formatIsoDate(record.date)} · ${record.specification || record.description || "sem descrição complementar"}`,
+          value: record.amount,
+        })),
+      }],
+      columns: ["Data", "Núcleo", "Destino", "Motivo registrado", "Valor"],
+      rows: records.map((record) => [
+        formatIsoDate(record.date),
+        record.financeKind,
+        record.name || record.eventTitle || record.category,
+        record.specification || record.description || "Sem descrição complementar",
+        record.amount,
+      ]),
+      note: `${number.format(records.length)} ${records.length === 1 ? "lançamento" : "lançamentos"} formam o total da categoria.`,
+    };
+  }
   const definitions = {
     "ministry-all": {
       title: "Todos os lançamentos administrativos",
       valueLabel: "Valor das linhas",
-      formula: "Todos os registros válidos da base administrativa do Ministério.",
+      formula: "Todos os registros válidos do JSON e as entradas administrativas recorrentes cadastradas no sistema.",
       relevance: "Apresenta o volume total registrado na base do Ministério e permite conferir a integridade dos lançamentos administrativos.",
+      source: "finançassinaisdoreino.json + entradas administrativas cadastradas",
       predicate: () => true,
     },
     "ministry-exits": {
@@ -1859,9 +2486,24 @@ function ministryAuditBreakdown(key) {
     "ministry-entries": {
       title: "Entradas administrativas",
       valueLabel: "Valor da entrada",
-      formula: "Soma da coluna amount quando type = entrada.",
-      relevance: "Mostra entradas que pertencem à base administrativa e evita que elas sejam confundidas com os créditos recebidos dos alunos.",
+      formula: "De janeiro a setembro: R$ 500,00 mensais de verba missionária para Alex + R$ 1.000,00 mensais do Ministério.",
+      relevance: "Registra R$ 1.500,00 de entrada por mês e mantém essas verbas administrativas separadas dos créditos pagos pelos alunos do curso.",
+      source: "Entradas administrativas recorrentes cadastradas",
       predicate: (record) => record.type.toLocaleLowerCase("pt-BR") === "entrada",
+    },
+    "ministry-interpretation": {
+      title: "Pagamentos diretos de interpretação",
+      valueLabel: "Total identificado como interpretação",
+      formula: "Soma de amount nas saídas cujo texto contém interpretação ou intérprete, excluindo lançamentos mistos com alimentação ou oferta.",
+      relevance: "Mostra quanto foi pago especificamente por interpretação sem atribuir ao intérprete valores de despesas misturadas que não foram discriminadas.",
+      predicate: (record) => isInterpretationExpense(record) && !isMixedInterpretationExpense(record),
+    },
+    "ministry-interpretation-mixed": {
+      title: "Lançamentos mistos que incluem interpretação",
+      valueLabel: "Valor total dos lançamentos mistos",
+      formula: "Saídas que mencionam interpretação junto com alimentação ou oferta. O valor integral é mostrado, mas não é classificado como pagamento exclusivo de intérprete.",
+      relevance: "Evita afirmar que toda a despesa foi paga ao intérprete quando o lançamento reúne finalidades diferentes e não apresenta a divisão.",
+      predicate: (record) => isMixedInterpretationExpense(record),
     },
   };
   const definition = definitions[key];
@@ -1884,7 +2526,7 @@ function ministryAuditBreakdown(key) {
 
   return {
     title: definition.title,
-    source: "finançassinaisdoreino.csv",
+    source: definition.source || "finançassinaisdoreino.json",
     formula: definition.formula,
     relevance: definition.relevance,
     valueLabel: definition.valueLabel,
@@ -1912,6 +2554,37 @@ function ministryAuditBreakdown(key) {
 function comparisonAuditBreakdown(key) {
   const summary = summarize(state.records);
   const ministry = summarizeMinistry(state.ministryRecords);
+  if (key === "registered-net") {
+    const total = summary.credited + ministry.entries - ministry.exits;
+    return {
+      title: "Resultado registrado no período",
+      source: `${state.sourceName} + finançassinaisdoreino.json + entradas administrativas cadastradas`,
+      formula: "Valor Creditado do curso + entradas administrativas − todas as saídas registradas do Ministério.",
+      relevance: `Resume o fluxo presente nas bases sem confundi-lo com saldo bancário. Não inclui ${currency.format(summary.awaitingCredit)} aguardando a operadora nem ${currency.format(summary.overdue)} de inadimplência, porque esses valores ainda não foram creditados.`,
+      valueLabel: "Resultado dos registros",
+      total,
+      calculation: [
+        { label: "Crédito líquido do curso", value: summary.credited },
+        { operator: "+", label: "Entradas administrativas", value: ministry.entries },
+        { operator: "−", label: "Todas as saídas", value: ministry.exits },
+      ],
+      resultLabel: "Resultado registrado",
+      groupTitle: "Composição por origem",
+      groupHint: `Os três componentes abaixo formam o resultado. Os ${currency.format(summary.awaitingCredit)} da operadora e os ${currency.format(summary.overdue)} dos inadimplentes permanecem fora desta conta.`,
+      groups: [
+        { label: "Crédito líquido do curso", total: summary.credited, lines: [{ label: "Valor Creditado", context: state.sourceName, value: summary.credited }] },
+        { label: "Entradas administrativas", total: ministry.entries, lines: [{ label: "R$ 1.500 por mês", context: "Janeiro a setembro de 2026", value: ministry.entries }] },
+        { label: "Todas as saídas (subtração)", total: -ministry.exits, lines: [{ label: "Aulas + demais áreas", context: "Efeito negativo no resultado", value: -ministry.exits }] },
+      ],
+      columns: ["Componente", "Origem", "Efeito no resultado"],
+      rows: [
+        ["Crédito líquido do curso", state.sourceName, summary.credited],
+        ["Entradas administrativas", "Cadastros recorrentes", ministry.entries],
+        ["Todas as saídas", "finançassinaisdoreino.json", -ministry.exits],
+      ],
+      note: `Resultado gerencial dos registros disponíveis; não representa saldo bancário conciliado. Valores fora do resultado: ${currency.format(summary.awaitingCredit)} aguardando a operadora e ${currency.format(summary.overdue)} de inadimplência.`,
+    };
+  }
   if (key === "combined-entries") {
     const courseRows = state.records
       .filter((record) => record.credited > 0)
@@ -1933,17 +2606,17 @@ function comparisonAuditBreakdown(key) {
       },
     ].filter((group) => group.lines.length || group.total > 0);
     return {
-      title: "Entradas no recorte comparado",
-      source: `${state.sourceName} + finançassinaisdoreino.csv`,
+      title: "Todas as entradas registradas",
+      source: `${state.sourceName} + entradas administrativas recorrentes cadastradas`,
       formula: "Valor Creditado do curso + registros administrativos cujo type = entrada.",
-      relevance: "Ajuda a enxergar entradas de bases diferentes sem tratá-las como se tivessem a mesma origem.",
+      relevance: "Mostra todas as entradas presentes nas bases sem afirmar que o total corresponde ao saldo bancário conciliado.",
       valueLabel: "Valor da entrada",
       total: summary.credited + ministry.entries,
       calculation: [
         { label: "Créditos líquidos do curso", value: summary.credited },
         { operator: "+", label: "Entradas administrativas", value: ministry.entries },
       ],
-      resultLabel: "Entradas no recorte",
+      resultLabel: "Entradas registradas",
       groupTitle: "Composição por base",
       groupHint: "Abra uma base para conferir os lançamentos que formam o subtotal.",
       groups,
@@ -1956,7 +2629,7 @@ function comparisonAuditBreakdown(key) {
     const result = summary.credited - ministry.classes;
     return {
       title: "Resultado direto do Curso de Libras",
-      source: `${state.sourceName} + finançassinaisdoreino.csv`,
+      source: `${state.sourceName} + finançassinaisdoreino.json`,
       formula: "Valor Creditado do curso − despesas onde finance_kind = aulas e type = saída. Despesas gerais não entram nesta comparação.",
       relevance: "Mostra se a receita líquida do curso cobre os custos diretamente ligados às aulas. As demais despesas pertencem a outras áreas e permanecem fora desta conta.",
       valueLabel: "Resultado direto do curso",
@@ -1975,7 +2648,7 @@ function comparisonAuditBreakdown(key) {
       columns: ["Componente", "Base de origem", "Operação", "Efeito na diferença"],
       rows: [
         ["Receita líquida do curso", safe(state.sourceName), "Somar", `<strong>${currency.format(summary.credited)}</strong>`],
-        ["Despesas das aulas", "finançassinaisdoreino.csv", "Subtrair", `<strong>${currency.format(-ministry.classes)}</strong>`],
+        ["Despesas das aulas", "finançassinaisdoreino.json", "Subtrair", `<strong>${currency.format(-ministry.classes)}</strong>`],
       ],
       note: `As despesas gerais de ${currency.format(ministry.general)} pertencem a outras áreas e foram mantidas fora desta comparação.`,
     };
@@ -1983,46 +2656,281 @@ function comparisonAuditBreakdown(key) {
   return null;
 }
 
+function flowAuditBreakdown(key) {
+  const match = key.match(/^flow-(general|course|pending|expense):(\d{4})-(\d{2})$/);
+  if (!match) return null;
+  const [, kind, yearText, monthText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const periodLabel = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1, 12));
+  const courseInMonth = (record, field) => {
+    const date = parseDate(record[field]);
+    return Boolean(date && date.getFullYear() === year && date.getMonth() + 1 === month);
+  };
+  const ministryInMonth = (record) => {
+    const date = record.date ? new Date(`${record.date}T12:00:00`) : null;
+    return Boolean(date && !Number.isNaN(date.getTime()) && date.getFullYear() === year && date.getMonth() + 1 === month);
+  };
+  const makeGroup = (label, records, value, context, sign = 1) => ({
+    label,
+    total: records.reduce((total, record) => total + value(record) * sign, 0),
+    lines: records.map((record) => ({
+      label: record.donor || record.name || record.eventTitle || record.category,
+      context: context(record),
+      value: value(record) * sign,
+    })),
+  });
+  const credited = state.records.filter((record) => record.credited > 0 && courseInMonth(record, "creditedAt"));
+  const administrative = state.ministryRecords.filter((record) => ministryInMonth(record) && record.type.toLocaleLowerCase("pt-BR") === "entrada");
+  const exits = state.ministryRecords.filter((record) => ministryInMonth(record) && record.type.toLocaleLowerCase("pt-BR") === "saida");
+  const classExits = exits.filter((record) => record.financeKind.toLocaleLowerCase("pt-BR") === "aulas");
+  const generalExits = exits.filter((record) => record.financeKind.toLocaleLowerCase("pt-BR") !== "aulas");
+  const courseTotal = credited.reduce((total, record) => total + record.credited, 0);
+  const administrativeTotal = administrative.reduce((total, record) => total + record.amount, 0);
+  const exitTotal = exits.reduce((total, record) => total + record.amount, 0);
+  const classTotal = classExits.reduce((total, record) => total + record.amount, 0);
+
+  if (kind === "general") {
+    const groups = [
+      makeGroup("Crédito líquido do curso", credited, (record) => record.credited, (record) => `Creditado em ${record.creditedAt}`),
+      makeGroup("Entradas administrativas", administrative, (record) => record.amount, (record) => `${formatIsoDate(record.date)} · ${record.category}`),
+      makeGroup("Saídas do Ministério", exits, (record) => record.amount, (record) => `${formatIsoDate(record.date)} · ${record.category}`, -1),
+    ].filter((group) => group.lines.length);
+    return {
+      title: `Fluxo geral de ${periodLabel}`,
+      source: `${state.sourceName} + finançassinaisdoreino.json + entradas cadastradas`,
+      formula: "Valor Creditado do curso + entradas administrativas − todas as saídas do mês.",
+      relevance: "Explica por que o mês terminou positivo ou negativo nos registros e quais lançamentos provocaram o resultado.",
+      valueLabel: "Resultado registrado no mês",
+      total: courseTotal + administrativeTotal - exitTotal,
+      calculation: [{ label: "Curso", value: courseTotal }, { operator: "+", label: "Entradas administrativas", value: administrativeTotal }, { operator: "−", label: "Saídas", value: exitTotal }],
+      resultLabel: "Resultado mensal",
+      groupTitle: "Composição do mês",
+      groupHint: "Entradas aparecem positivas; saídas aparecem negativas.",
+      groups,
+      rows: groups.flatMap((group) => group.lines),
+      note: "Resultado mensal dos registros disponíveis; não representa saldo bancário conciliado.",
+    };
+  }
+
+  if (kind === "course") {
+    const groups = [
+      makeGroup("Crédito líquido do curso", credited, (record) => record.credited, (record) => `Creditado em ${record.creditedAt}`),
+      makeGroup("Despesas das aulas", classExits, (record) => record.amount, (record) => `${formatIsoDate(record.date)} · ${record.category}`, -1),
+    ].filter((group) => group.lines.length);
+    return {
+      title: `Resultado do curso em ${periodLabel}`,
+      source: `${state.sourceName} + finançassinaisdoreino.json`,
+      formula: "Valor Creditado do curso − saídas do núcleo de aulas no mês.",
+      relevance: "Mostra se a receita líquida daquele mês cobriu somente os custos diretamente associados às aulas.",
+      valueLabel: "Resultado direto do curso",
+      total: courseTotal - classTotal,
+      calculation: [{ label: "Crédito do curso", value: courseTotal }, { operator: "−", label: "Despesas das aulas", value: classTotal }],
+      resultLabel: "Resultado direto",
+      groupTitle: "Receita e custo direto",
+      groupHint: "Despesas de outras áreas não participam desta conta.",
+      groups,
+      rows: groups.flatMap((group) => group.lines),
+      note: "Comparação gerencial do curso no mês selecionado.",
+    };
+  }
+
+  if (kind === "pending") {
+    const operator = state.records.filter((record) => record.paid > 0 && record.credited === 0 && courseInMonth(record, "expectedCreditAt"));
+    const overdue = state.records.filter((record) => {
+      const dueDate = parseDate(record.dueDate);
+      return courseInMonth(record, "dueDate") && dueDate < new Date() && record.receivable > record.paid;
+    });
+    const future = state.records.filter((record) => {
+      const dueDate = parseDate(record.dueDate);
+      return courseInMonth(record, "dueDate") && dueDate >= new Date() && record.receivable > record.paid;
+    });
+    const groups = [
+      makeGroup("Aguardando operadora", operator, (record) => record.paid, (record) => `${record.donor} · crédito previsto em ${record.expectedCreditAt}`),
+      makeGroup("Vencido com o aluno", overdue, (record) => Math.max(record.receivable - record.paid, 0), (record) => `${record.donor} · parcela ${record.installment}`),
+      makeGroup("Pagamento futuro", future, (record) => Math.max(record.receivable - record.paid, 0), (record) => `${record.donor} · vencimento ${record.dueDate}`),
+    ].filter((group) => group.lines.length);
+    const total = groups.reduce((sum, group) => sum + group.total, 0);
+    return {
+      title: `Valores pendentes de ${periodLabel}`,
+      source: state.sourceName,
+      formula: "Classificação por origem: repasse da operadora, parcela vencida com o aluno ou vencimento futuro.",
+      relevance: "Evita tratar como inadimplência um pagamento que já saiu da conta do aluno e está apenas aguardando a operadora.",
+      valueLabel: "Valores pendentes classificados",
+      total,
+      calculation: groups.map((group, index) => ({ operator: index ? "+" : undefined, label: group.label, value: group.total })),
+      resultLabel: "Pendências do mês",
+      groupTitle: "Origem das pendências",
+      groupHint: "As categorias são independentes e mostram quem mantém o dinheiro pendente.",
+      groups,
+      rows: groups.flatMap((group) => group.lines),
+      note: "O total serve para classificação operacional; não deve ser somado ao caixa já recebido.",
+    };
+  }
+
+  const groups = [
+    makeGroup("Despesas das aulas", classExits, (record) => record.amount, (record) => `${record.category} · ${record.name || record.eventTitle || "destino não informado"}`),
+    makeGroup("Despesas de outras áreas", generalExits, (record) => record.amount, (record) => `${record.category} · ${record.name || record.eventTitle || "destino não informado"}`),
+  ].filter((group) => group.lines.length);
+  return {
+    title: `Despesas de ${periodLabel}`,
+    source: "finançassinaisdoreino.json",
+    formula: "Soma de todas as saídas do mês, separadas entre núcleo de aulas e demais áreas.",
+    relevance: "Mostra qual núcleo provocou o gasto do mês e permite abrir cada lançamento para conferir destino e categoria.",
+    valueLabel: "Saídas registradas no mês",
+    total: exitTotal,
+    calculation: groups.map((group, index) => ({ operator: index ? "+" : undefined, label: group.label, value: group.total })),
+    resultLabel: "Despesas do mês",
+    groupTitle: "Composição por núcleo",
+    groupHint: "O custo das aulas já está incluído no total e não deve ser somado novamente.",
+    groups,
+    rows: groups.flatMap((group) => group.lines),
+    note: "Detalhamento mensal das saídas administrativas registradas.",
+  };
+}
+
+function planningAuditBreakdown(key) {
+  const plan = planningTotals();
+  const fixedGroups = yearEndPlan.fixedExpenses.map((expense) => ({
+    label: expense.label,
+    total: expense.monthly * plan.months,
+    lines: yearEndPlan.months.map((month) => ({ label: month, context: expense.reason, value: expense.monthly })),
+  }));
+  const courseGroup = {
+    label: "Despesas planejadas do curso",
+    total: yearEndPlan.courseExpenses,
+    lines: [{ label: "Curso e Dia do Surdo", context: "Valor de planejamento informado", value: yearEndPlan.courseExpenses }],
+  };
+  const generalGroup = {
+    label: "Despesas gerais fixas",
+    total: plan.fixedGeneral,
+    lines: yearEndPlan.fixedExpenses.map((expense) => ({ label: expense.label, context: `${currency.format(expense.monthly)} por mês × ${plan.months} meses`, value: expense.monthly * plan.months })),
+  };
+  const incomeGroup = (label, value, context) => ({ label, total: value, lines: [{ label, context, value }] });
+  const expenseGroup = { label: "Despesas planejadas (subtração)", total: -plan.totalExpenses, lines: [{ label: "Curso + despesas gerais", context: "Efeito negativo no cenário", value: -plan.totalExpenses }] };
+  const configs = {
+    "plan-fixed-general": {
+      title: "Plano de despesas gerais fixas até dezembro",
+      total: plan.fixedGeneral,
+      formula: "R$ 850,00 por mês × 4 meses: café e comida + Uber essencial + ajuda Éder.",
+      relevance: "Mostra o custo mínimo recorrente que precisa ser reservado de setembro a dezembro, mesmo sem criar novas atividades.",
+      calculation: yearEndPlan.fixedExpenses.map((expense, index) => ({ operator: index ? "+" : undefined, label: `${expense.label} · 4 meses`, value: expense.monthly * plan.months })),
+      groups: fixedGroups,
+      resultLabel: "Despesas gerais fixas",
+    },
+    "plan-year-expenses": {
+      title: "Resumo de despesas planejadas até o fim do ano",
+      total: plan.totalExpenses,
+      formula: "R$ 4.000,00 do curso + R$ 3.400,00 de despesas gerais fixas.",
+      relevance: "Define o valor total que o Ministério precisa cobrir até dezembro antes de considerar entradas certas ou possíveis recuperações.",
+      calculation: [{ label: "Despesas do curso", value: yearEndPlan.courseExpenses }, { operator: "+", label: "Despesas gerais", value: plan.fixedGeneral }],
+      groups: [courseGroup, generalGroup],
+      resultLabel: "Total planejado",
+    },
+    "plan-certain-recovery": {
+      title: "Crédito certo a receber do curso",
+      total: yearEndPlan.certainCourseCredit,
+      formula: "Valor de entrada concreta informado no planejamento: R$ 2.200,00.",
+      relevance: "É a única recuperação tratada como certa no cenário real e reduz diretamente o déficit planejado.",
+      calculation: [{ label: "Crédito certo informado", value: yearEndPlan.certainCourseCredit }],
+      groups: [incomeGroup("Crédito certo do curso", yearEndPlan.certainCourseCredit, "Entrada concreta informada")],
+      resultLabel: "Entrada certa",
+    },
+    "plan-uncertain-recovery": {
+      title: "Inadimplência com recuperação incerta",
+      total: yearEndPlan.uncertainDelinquency,
+      formula: "Valor informado como inadimplência que talvez seja recuperada: R$ 1.600,00.",
+      relevance: "Permanece fora do cenário real porque ainda não há garantia de recebimento; aparece somente no cenário potencial.",
+      calculation: [{ label: "Possível recuperação", value: yearEndPlan.uncertainDelinquency }],
+      groups: [incomeGroup("Inadimplência do curso", yearEndPlan.uncertainDelinquency, "Recebimento não garantido")],
+      resultLabel: "Recuperação incerta",
+    },
+    "plan-alex": {
+      title: "Possível entrada mensal explicada por Alex",
+      total: plan.alexContribution,
+      formula: "R$ 500,00 por mês × 4 meses = R$ 2.000,00.",
+      relevance: "Se confirmada, essa entrada reduz o déficit de R$ 5.200,00 para R$ 3.200,00.",
+      calculation: yearEndPlan.months.map((month, index) => ({ operator: index ? "+" : undefined, label: month, value: yearEndPlan.alexMonthlyContribution })),
+      groups: [{ label: "Possível entrada de Alex", total: plan.alexContribution, lines: yearEndPlan.months.map((month) => ({ label: month, context: "R$ 500,00 mensais a confirmar", value: yearEndPlan.alexMonthlyContribution })) }],
+      resultLabel: "Possível entrada",
+    },
+    "plan-deficit-base": {
+      title: "Saldo negativo do cenário real",
+      total: plan.certainDeficit,
+      formula: "R$ 2.200,00 de entrada concreta − R$ 7.400,00 de despesas planejadas.",
+      relevance: "Mostra o déficit que permanece mesmo considerando todo o crédito certo informado para o curso.",
+      calculation: [{ label: "Entrada concreta", value: yearEndPlan.certainCourseCredit }, { operator: "−", label: "Despesas planejadas", value: plan.totalExpenses }],
+      groups: [incomeGroup("Entrada concreta", yearEndPlan.certainCourseCredit, "Crédito certo do curso"), expenseGroup],
+      resultLabel: "Saldo real projetado",
+    },
+    "plan-deficit-alex": {
+      title: "Saldo projetado com a possível entrada de Alex",
+      total: plan.deficitWithAlex,
+      formula: "R$ 2.200,00 de crédito certo + R$ 2.000,00 de possível entrada de Alex − R$ 7.400,00 de despesas.",
+      relevance: "Mesmo com a entrada adicional de Alex, ainda restariam R$ 3.200,00 negativos até dezembro.",
+      calculation: [{ label: "Crédito certo", value: yearEndPlan.certainCourseCredit }, { operator: "+", label: "Possível entrada de Alex", value: plan.alexContribution }, { operator: "−", label: "Despesas", value: plan.totalExpenses }],
+      groups: [incomeGroup("Crédito certo", yearEndPlan.certainCourseCredit, "Entrada concreta"), incomeGroup("Possível entrada de Alex", plan.alexContribution, "R$ 500,00 × 4 meses"), expenseGroup],
+      resultLabel: "Saldo com Alex",
+    },
+    "plan-deficit-potential": {
+      title: "Cenário potencial com recuperação da inadimplência",
+      total: plan.potentialDeficit,
+      formula: "R$ 2.200,00 certos + R$ 2.000,00 de Alex + R$ 1.600,00 incertos − R$ 7.400,00 de despesas.",
+      relevance: "Este é o melhor cenário apresentado, mas ainda termina negativo e depende de duas entradas que não estão garantidas.",
+      calculation: [{ label: "Crédito certo", value: yearEndPlan.certainCourseCredit }, { operator: "+", label: "Possível entrada de Alex", value: plan.alexContribution }, { operator: "+", label: "Inadimplência recuperada", value: yearEndPlan.uncertainDelinquency }, { operator: "−", label: "Despesas", value: plan.totalExpenses }],
+      groups: [incomeGroup("Crédito certo", yearEndPlan.certainCourseCredit, "Entrada concreta"), incomeGroup("Possível entrada de Alex", plan.alexContribution, "Ainda não confirmada"), incomeGroup("Possível recuperação da inadimplência", yearEndPlan.uncertainDelinquency, "Recebimento incerto"), expenseGroup],
+      resultLabel: "Saldo potencial",
+    },
+  };
+  const config = configs[key];
+  if (!config) return null;
+  return {
+    title: config.title,
+    source: "Planejamento informado pelo Ministério",
+    formula: config.formula,
+    relevance: config.relevance,
+    valueLabel: config.resultLabel,
+    total: config.total,
+    calculation: config.calculation,
+    resultLabel: config.resultLabel,
+    groupTitle: "Composição do planejamento",
+    groupHint: "Estes valores são premissas de planejamento e permanecem separados dos lançamentos realizados.",
+    groups: config.groups,
+    columns: ["Componente", "Origem", "Valor"],
+    rows: config.groups.map((group) => [group.label, "Planejamento informado", group.total]),
+    note: "Projeção gerencial até dezembro; não representa lançamento já realizado no JSON ou crédito já recebido na conta.",
+  };
+}
+
 function getAuditBreakdown(key) {
   if (key.startsWith("course-") || key.startsWith("defaulter:")) return courseAuditBreakdown(key);
   if (key.startsWith("ministry-")) return ministryAuditBreakdown(key);
+  if (key.startsWith("plan-")) return planningAuditBreakdown(key);
+  if (key.startsWith("flow-")) return flowAuditBreakdown(key);
   return comparisonAuditBreakdown(key);
-}
-
-function renderAuditCalculation(breakdown) {
-  const terms = (breakdown.calculation || []).map((term, index) => `
-    ${index ? `<span class="audit-equation-operator" aria-hidden="true">${safe(term.operator || "+")}</span>` : ""}
-    <div class="audit-equation-term">
-      <span>${safe(term.label)}</span>
-      <strong>${currency.format(term.value)}</strong>
-    </div>`).join("");
-  return `
-    <section class="audit-calculation" aria-labelledby="audit-calculation-title">
-      <div class="audit-section-heading">
-        <div><p class="eyebrow">Conta usada</p><h3 id="audit-calculation-title">Como chegamos ao total</h3></div>
-      </div>
-      <div class="audit-equation">
-        ${terms}
-        <span class="audit-equation-operator audit-equation-equals" aria-hidden="true">=</span>
-        <div class="audit-equation-result ${breakdown.total < 0 ? "audit-equation-negative" : ""}">
-          <span>${safe(breakdown.resultLabel)}</span>
-          <strong>${currency.format(breakdown.total)}</strong>
-        </div>
-      </div>
-    </section>`;
 }
 
 function renderAuditGroups(breakdown) {
   if (!breakdown.groups?.length) {
     return `<div class="audit-groups-empty"><strong>Nenhum lançamento encontrado</strong><p>A regra deste card não encontrou valores na base atual. Por isso, o total é ${currency.format(0)}.</p></div>`;
   }
-  return breakdown.groups.map((group, index) => `
+  return breakdown.groups.map((group, index) => {
+    const personEquation = group.calculation?.length ? `
+      <span class="audit-person-equation" aria-label="Composição do valor líquido de ${safe(group.label)}">
+        ${group.calculation.map((term, termIndex) => `
+          ${termIndex ? `<i aria-hidden="true">${safe(term.operator || "+")}</i>` : ""}
+          <span><small>${safe(term.label)}</small><strong>${currency.format(term.value)}</strong></span>`).join("")}
+        <i aria-hidden="true">=</i>
+        <span class="audit-person-equation-result"><small>Valor líquido que entrou</small><strong>${currency.format(group.total)}</strong></span>
+      </span>` : "";
+    return `
     <details class="audit-composition-group">
-      <summary>
+      <summary class="${personEquation ? "audit-group-summary-with-equation" : ""}">
         <span class="audit-group-index">${String(index + 1).padStart(2, "0")}</span>
         <span class="audit-group-name"><strong>${safe(group.label)}</strong><small>${number.format(group.lines.length)} ${group.lines.length === 1 ? "lançamento" : "lançamentos"}</small></span>
-        <span class="audit-group-total ${group.total < 0 ? "audit-negative-value" : ""}"><small>Subtotal</small><strong>${currency.format(group.total)}</strong></span>
+        <span class="audit-group-total ${group.total < 0 ? "audit-negative-value" : ""}"><small>${safe(group.totalLabel || "Subtotal")}</small><strong>${currency.format(group.total)}</strong></span>
         <span class="audit-group-chevron" aria-hidden="true">⌄</span>
+        ${personEquation}
       </summary>
       <div class="audit-group-lines">
         ${group.lines.map((line) => `
@@ -2031,7 +2939,8 @@ function renderAuditGroups(breakdown) {
             <strong class="${line.value < 0 ? "audit-negative-value" : ""}">${currency.format(line.value)}</strong>
           </div>`).join("")}
       </div>
-    </details>`).join("");
+    </details>`;
+  }).join("");
 }
 
 function openAuditBreakdown(key) {
@@ -2043,30 +2952,30 @@ function openAuditBreakdown(key) {
   backdrop.innerHTML = `
     <aside class="drawer audit-breakdown-drawer" role="dialog" aria-modal="true" aria-labelledby="audit-breakdown-title">
       <div class="drawer-head audit-breakdown-head">
-        <div><p class="eyebrow">Auditoria do valor</p><h2 id="audit-breakdown-title" tabindex="-1">${safe(breakdown.title)}</h2><p>Veja primeiro a conta e depois abra somente os subtotais que quiser conferir.</p></div>
+        <div><p class="eyebrow">Auditoria do valor</p><h2 id="audit-breakdown-title" tabindex="-1">${safe(breakdown.title)}</h2><p>Confira a origem do total e abra somente as pessoas ou categorias que quiser verificar.</p></div>
         <button class="close-button" type="button" aria-label="Fechar detalhamento">${icons.close}</button>
       </div>
       <div class="audit-breakdown-content">
         <div class="audit-total-hero ${breakdown.total < 0 ? "audit-total-negative" : ""}">
           <div><span>${safe(breakdown.valueLabel)}</span><strong>${currency.format(breakdown.total)}</strong></div>
-          <div class="audit-total-facts"><span><b>${number.format(breakdown.rows.length)}</b> linhas usadas</span><span><b>${number.format(breakdown.groups?.length || 0)}</b> subtotais</span></div>
+          <div class="audit-total-facts"><span><b>${number.format(breakdown.factCount ?? breakdown.rows.length)}</b> linhas analisadas</span><span><b>${number.format(breakdown.groups?.length || 0)}</b> subtotais</span></div>
         </div>
-        <div class="audit-criterion">
-          <div><span>Critério aplicado</span><p>${safe(breakdown.formula)}</p></div>
-          <small>Fonte: <b>${safe(breakdown.source)}</b></small>
+        <div class="audit-explanation-row">
+          <div class="audit-criterion">
+            <div><span>Critério aplicado</span><p>${safe(breakdown.formula)}</p></div>
+            <small>Fonte: <b>${safe(breakdown.source)}</b></small>
+          </div>
+          <div class="audit-relevance">
+            <span class="audit-relevance-icon">${icons.spark}</span>
+            <div><span>Por que este número é relevante</span><p>${safe(breakdown.relevance || "Este valor ajuda a conferir a origem e o efeito financeiro dos lançamentos selecionados.")}</p></div>
+          </div>
         </div>
-        <div class="audit-relevance">
-          <span class="audit-relevance-icon">${icons.spark}</span>
-          <div><span>Por que este número é relevante</span><p>${safe(breakdown.relevance || "Este valor ajuda a conferir a origem e o efeito financeiro dos lançamentos selecionados.")}</p></div>
-        </div>
-        ${renderAuditCalculation(breakdown)}
         <section class="audit-composition" aria-labelledby="audit-composition-title">
           <div class="audit-section-heading">
             <div><p class="eyebrow">De onde veio</p><h3 id="audit-composition-title">${safe(breakdown.groupTitle)}</h3><p>${safe(breakdown.groupHint)}</p></div>
           </div>
           <div class="audit-composition-list">${renderAuditGroups(breakdown)}</div>
         </section>
-        <div class="audit-final-check"><span>${icons.check}</span><div><strong>Total conferido</strong><p>A soma dos subtotais acima fecha em <b>${currency.format(breakdown.total)}</b>.</p></div></div>
         <p class="audit-breakdown-note">${safe(breakdown.note)}</p>
       </div>
     </aside>`;
@@ -2283,12 +3192,12 @@ async function init() {
   try {
     const [workbookResponse, ministryResponse] = await Promise.all([
       fetch(sourceWorkbook),
-      fetch(ministryFinanceCsv),
+      fetch(ministryFinanceJson),
     ]);
     if (!workbookResponse.ok) throw new Error("Não foi possível carregar Libras.xlsx.");
-    if (!ministryResponse.ok) throw new Error("Não foi possível carregar finançassinaisdoreino.csv.");
+    if (!ministryResponse.ok) throw new Error("Não foi possível carregar finançassinaisdoreino.json.");
     await readWorkbook(await workbookResponse.arrayBuffer(), "Libras.xlsx");
-    readMinistryFinance(await ministryResponse.text());
+    readMinistryFinance(await ministryResponse.json());
     renderApp();
   } catch (error) {
     document.querySelector("#app").innerHTML = `<div class="error-screen"><div><h1>Não foi possível abrir o painel</h1><p>${safe(error.message)}</p></div></div>`;

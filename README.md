@@ -1,6 +1,6 @@
 # Reino Financeiro
 
-Painel financeiro responsivo criado a partir da planilha `Libras.xlsx` e da base administrativa `finançassinaisdoreino.csv`.
+Painel financeiro responsivo criado a partir da planilha `Libras.xlsx` e da base administrativa `finançassinaisdoreino.json`.
 
 ## Executar
 
@@ -17,7 +17,11 @@ npm run build
 
 O painel lê a primeira aba da planilha, usa a linha 25 como cabeçalho e considera como lançamento válido toda linha que possua participante e evento. Também é possível importar outra planilha com a mesma estrutura diretamente pela interface.
 
-O arquivo `finançassinaisdoreino.csv` alimenta a aba “Finanças do Ministério”. Essa base permanece separada dos recebimentos dos alunos: somente o resumo de despesas é apresentado também na Visão geral, sem produzir um saldo combinado entre bases de escopos diferentes.
+O arquivo `finançassinaisdoreino.json` alimenta a área “Ministério e despesas” e é complementado pelas entradas administrativas recorrentes cadastradas em `src/registered-ministry-entries.js`. As movimentações do Ministério permanecem separadas dos recebimentos dos alunos, evitando misturar bases com escopos diferentes.
+
+O painel operacional está organizado em quatro áreas: Visão geral, Curso e alunos, Ministério e despesas e Fluxo e projeções. As antigas páginas de tabela e planejamento foram incorporadas às áreas correspondentes; as listagens filtradas são exibidas em sequência, sem paginação. A aba Apresentação permanece como modo próprio de exibição em tela cheia.
+
+A apresentação financeira possui cinco páginas de auditoria: resumo executivo, receita líquida do curso, pendências, detalhamento das despesas e fluxo mensal consolidado. O resultado consolidado é identificado como resultado dos registros e não como saldo bancário enquanto não houver conciliação com extrato e saldo inicial.
 
 Os lançamentos acrescentados manualmente ao painel ficam centralizados em `src/manual-records.js`. Antes de adicioná-los, a aplicação verifica nome, vencimento, parcela e valor para evitar duplicidade caso uma planilha atualizada já contenha o mesmo registro.
 
