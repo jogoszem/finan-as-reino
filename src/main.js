@@ -7,6 +7,9 @@ const sourceWorkbook = new URL("../Libras.xlsx", import.meta.url);
 const ministryFinanceJson = new URL("../finançassinaisdoreino.json", import.meta.url);
 const brandLogo = new URL("./logos/logo.svg", import.meta.url);
 const crownLogo = new URL("./logos/coroa.svg", import.meta.url);
+const authUser = "Finanças sinais";
+const authPassword = "322655sinais";
+const authSessionKey = "reino-financeiro-authenticated";
 
 const yearEndPlan = {
   months: ["Setembro", "Outubro", "Novembro", "Dezembro"],
@@ -1622,6 +1625,7 @@ function renderApp() {
             <input id="file-input" type="file" accept=".xlsx,.xls" hidden />
             <button class="button" id="import-button" type="button" title="Importar outra planilha">${icons.upload}<span>Importar</span></button>
             <button class="button button-primary" id="export-button" type="button" title="Exportar lançamentos filtrados">${icons.download}<span>Exportar CSV</span></button>
+            <button class="button logout-button" id="logout-button" type="button" title="Encerrar esta sessão"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h5m4-4 4-3-4-3m4 3H9" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sair</span></button>
           </div>
         </header>
 
@@ -1902,6 +1906,7 @@ function bindAppEvents() {
   document.querySelector("#import-button").addEventListener("click", () => document.querySelector("#file-input").click());
   document.querySelector("#file-input").addEventListener("change", importWorkbook);
   document.querySelector("#export-button").addEventListener("click", exportCsv);
+  document.querySelector("#logout-button").addEventListener("click", logout);
 }
 
 function activateView(viewId, resetScroll = false) {
@@ -3188,7 +3193,93 @@ function showToast(message) {
   window.setTimeout(() => toast.remove(), 2800);
 }
 
-async function init() {
+function hasAuthenticatedSession() {
+  try {
+    return window.sessionStorage.getItem(authSessionKey) === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function setAuthenticatedSession(enabled) {
+  try {
+    if (enabled) window.sessionStorage.setItem(authSessionKey, "yes");
+    else window.sessionStorage.removeItem(authSessionKey);
+  } catch {
+    // O login continua funcionando durante a navegação mesmo se o navegador bloquear o armazenamento.
+  }
+}
+
+function renderLogin(message = "") {
+  const app = document.querySelector("#app");
+  document.body.classList.add("login-active");
+  app.innerHTML = `<main class="login-screen">
+    <section class="login-brand-panel" aria-label="Ministério Sinais do Reino">
+      <img class="login-crown-watermark" src="${crownLogo}" alt="" aria-hidden="true" />
+      <div class="login-brand-content">
+        <div class="login-ministry-logo"><img src="${brandLogo}" alt="Ministério Sinais do Reino" /></div>
+        <div class="login-brand-copy"><span>Gestão financeira</span><h1>Clareza para cuidar de cada recurso.</h1><p>Acompanhe receitas, despesas, alunos e projeções em um ambiente reservado para a equipe do Ministério.</p></div>
+        <div class="login-trust-row"><span>${icons.check} Dados organizados</span><span>${icons.bank} Auditoria explicada</span></div>
+      </div>
+    </section>
+
+    <section class="login-form-panel">
+      <form class="login-card" id="login-form" novalidate>
+        <div class="login-finance-brand">
+          <span class="login-finance-mark" aria-hidden="true"><svg viewBox="0 0 56 56" fill="none"><rect x="1" y="1" width="54" height="54" rx="17" fill="currentColor"/><path d="M15 38V28m9 10V20m9 18V25m9 13V15" stroke="white" stroke-width="4" stroke-linecap="round"/><path d="m14 19 9-5 9 3 10-8" stroke="#8cc8ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span><strong>Finanças</strong><small>Sinais do Reino</small></span>
+        </div>
+        <div class="login-heading"><p class="eyebrow">Acesso interno</p><h2>Bem-vindo</h2><p>Entre com as credenciais financeiras do Ministério.</p></div>
+        <label class="login-field"><span>Nome de acesso</span><div>${icons.people}<input id="login-user" name="username" type="text" value="${safe(authUser)}" autocomplete="username" autocapitalize="none" required /></div></label>
+        <label class="login-field"><span>Senha</span><div>${icons.bank}<input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Digite sua senha" required /><button class="login-password-toggle" id="login-password-toggle" type="button" aria-label="Mostrar senha"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.5"/></svg></button></div></label>
+        <p class="login-error" id="login-error" role="alert" aria-live="polite">${safe(message)}</p>
+        <button class="login-submit" type="submit"><span>Entrar no financeiro</span>${icons.arrow}</button>
+        <p class="login-security-note">Acesso reservado à administração financeira.</p>
+      </form>
+    </section>
+  </main>`;
+
+  const form = document.querySelector("#login-form");
+  const passwordInput = document.querySelector("#login-password");
+  const toggle = document.querySelector("#login-password-toggle");
+  toggle.addEventListener("click", () => {
+    const show = passwordInput.type === "password";
+    passwordInput.type = show ? "text" : "password";
+    toggle.setAttribute("aria-label", show ? "Ocultar senha" : "Mostrar senha");
+    toggle.classList.toggle("showing", show);
+    passwordInput.focus();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = document.querySelector("#login-user").value.trim();
+    const password = passwordInput.value;
+    const error = document.querySelector("#login-error");
+    const validUser = username.toLocaleLowerCase("pt-BR") === authUser.toLocaleLowerCase("pt-BR");
+    if (!validUser || password !== authPassword) {
+      error.textContent = "Nome de acesso ou senha incorretos. Confira os dados e tente novamente.";
+      form.classList.remove("login-card-error");
+      requestAnimationFrame(() => form.classList.add("login-card-error"));
+      passwordInput.select();
+      return;
+    }
+    setAuthenticatedSession(true);
+    document.body.classList.remove("login-active");
+    app.innerHTML = `<div class="loading-screen" role="status" aria-live="polite"><div class="loading-mark">R</div><p>Organizando os dados financeiros…</p></div>`;
+    await loadDashboard();
+  });
+  passwordInput.focus();
+}
+
+function logout() {
+  setAuthenticatedSession(false);
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  document.body.classList.remove("audit-modal-open");
+  state.activeView = "overview";
+  state.presentationPage = 0;
+  renderLogin();
+}
+
+async function loadDashboard() {
   try {
     const [workbookResponse, ministryResponse] = await Promise.all([
       fetch(sourceWorkbook),
@@ -3198,10 +3289,19 @@ async function init() {
     if (!ministryResponse.ok) throw new Error("Não foi possível carregar finançassinaisdoreino.json.");
     await readWorkbook(await workbookResponse.arrayBuffer(), "Libras.xlsx");
     readMinistryFinance(await ministryResponse.json());
+    document.body.classList.remove("login-active");
     renderApp();
   } catch (error) {
     document.querySelector("#app").innerHTML = `<div class="error-screen"><div><h1>Não foi possível abrir o painel</h1><p>${safe(error.message)}</p></div></div>`;
   }
+}
+
+function init() {
+  if (!hasAuthenticatedSession()) {
+    renderLogin();
+    return;
+  }
+  loadDashboard();
 }
 
 init();

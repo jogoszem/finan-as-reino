@@ -21,6 +21,8 @@ O arquivo `finançassinaisdoreino.json` alimenta a área “Ministério e despes
 
 O painel operacional está organizado em quatro áreas: Visão geral, Curso e alunos, Ministério e despesas e Fluxo e projeções. As antigas páginas de tabela e planejamento foram incorporadas às áreas correspondentes; as listagens filtradas são exibidas em sequência, sem paginação. A aba Apresentação permanece como modo próprio de exibição em tela cheia.
 
+Antes de carregar os dados, a interface solicita as credenciais financeiras do Ministério. A autenticação atual é uma barreira local no navegador e mantém a sessão apenas enquanto a aba estiver aberta; para publicação em ambiente público, ela deve ser substituída por autenticação validada em servidor.
+
 A apresentação financeira possui cinco páginas de auditoria: resumo executivo, receita líquida do curso, pendências, detalhamento das despesas e fluxo mensal consolidado. O resultado consolidado é identificado como resultado dos registros e não como saldo bancário enquanto não houver conciliação com extrato e saldo inicial.
 
 Os lançamentos acrescentados manualmente ao painel ficam centralizados em `src/manual-records.js`. Antes de adicioná-los, a aplicação verifica nome, vencimento, parcela e valor para evitar duplicidade caso uma planilha atualizada já contenha o mesmo registro.
